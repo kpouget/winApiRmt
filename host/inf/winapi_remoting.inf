@@ -1,0 +1,47 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderString%
+CatalogFile = winapi_remoting.cat
+DriverVer   = 12/16/2025,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+winapi_remoting.sys = 1,,
+
+[Manufacturer]
+%StdMfg%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%WinapiRemoting.DeviceDesc%=WinapiRemoting_Device, VMBUS\{6ac83d8f-6e16-4e5c-ab3d-fd8c5a4b7e21}
+
+[WinapiRemoting_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+winapi_remoting.sys
+
+[WinapiRemoting_Device.NT.Services]
+AddService = WinapiRemoting,%SPSVCINST_ASSOCSERVICE%, WinapiRemoting_Service_Inst
+
+[WinapiRemoting_Service_Inst]
+DisplayName    = %WinapiRemoting.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\winapi_remoting.sys
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ProviderString = "WinAPI Remoting"
+StdMfg = "(Standard system devices)"
+DiskId1 = "WinAPI Remoting Installation Disk #1"
+WinapiRemoting.DeviceDesc = "Windows API Remoting VMBus Device"
+WinapiRemoting.SVCDESC = "Windows API Remoting Service"
