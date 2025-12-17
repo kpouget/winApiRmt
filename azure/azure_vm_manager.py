@@ -22,6 +22,7 @@ import logging
 import argparse
 import yaml
 import subprocess
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -92,6 +93,8 @@ class VMConfig:
     vm_size: str = None
     admin_username: str = None
     admin_password: str = None
+    install_wsl: bool = None
+    reboot_after_wsl: bool = None
 
     def __post_init__(self):
         # Load configuration from files
@@ -111,6 +114,10 @@ class VMConfig:
         # Load credentials from secrets
         self.admin_username = self.admin_username or secrets_data['admin_username']
         self.admin_password = self.admin_password or secrets_data['admin_password']
+
+        # WSL configuration
+        self.install_wsl = self.install_wsl if self.install_wsl is not None else config_data.get('install_wsl', False)
+        self.reboot_after_wsl = self.reboot_after_wsl if self.reboot_after_wsl is not None else config_data.get('reboot_after_wsl', True)
 
         # Handle tags
         if self.tags is None:
@@ -345,8 +352,17 @@ class AzureVMManager:
             # Escape the public key for PowerShell
             escaped_public_key = public_key.replace('"', '""')
 
-            # Create PowerShell command that runs the script with parameters
-            ssh_command = f'powershell.exe -ExecutionPolicy Bypass -Command "$publicKey = \\"{escaped_public_key}\\"; $adminUser = \\"{self.config.admin_username}\\"; {ssh_script}"'
+            # Create PowerShell command that downloads and runs the script
+            # This avoids command line length limits and escaping issues
+            script_content_b64 = base64.b64encode(ssh_script.encode('utf-8')).decode('ascii')
+
+            ssh_command = f'''powershell.exe -ExecutionPolicy Bypass -Command "
+                $scriptContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{script_content_b64}'));
+                $scriptPath = 'C:\\\\temp\\\\setup-ssh-server.ps1';
+                New-Item -ItemType Directory -Path 'C:\\\\temp' -Force | Out-Null;
+                $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8;
+                & $scriptPath -PublicKey '{escaped_public_key}' -AdminUser '{self.config.admin_username}' -InstallWSL ${'true' if self.config.install_wsl else 'false'} -RebootAfterWSL ${'true' if self.config.reboot_after_wsl else 'false'}
+            "'''
 
             # Create custom script extension with correct parameters
             from azure.mgmt.compute.models import VirtualMachineExtension
@@ -371,6 +387,16 @@ class AzureVMManager:
             self.logger.info("✅ SSH server and key authentication configured successfully")
             self.logger.info(f"🔑 Private key saved to: {private_key_path}")
             self.logger.info(f"🔑 Public key deployed to VM authorized_keys")
+
+            # Log WSL and reboot status
+            if self.config.install_wsl:
+                self.logger.info("🐧 WSL (Fedora Linux 43) installation initiated")
+                if self.config.reboot_after_wsl:
+                    self.logger.warning("🔄 VM will automatically reboot in ~30 seconds to complete WSL installation")
+                    self.logger.info("⏳ SSH access will be temporarily unavailable during reboot")
+                    self.logger.info("✅ After reboot: SSH and WSL will be fully functional")
+                else:
+                    self.logger.warning("⚠️  Automatic reboot disabled - manual restart recommended for full WSL")
 
         except Exception as e:
             self.logger.warning(f"⚠️  SSH server setup failed: {e}")
@@ -897,6 +923,10 @@ def main():
                        help='Admin username (overrides .env.secret)')
     parser.add_argument('--admin-password',
                        help='Admin password (overrides .env.secret)')
+    parser.add_argument('--install-wsl', action='store_true',
+                       help='Install WSL with Fedora Linux 43 (overrides config.yaml)')
+    parser.add_argument('--no-reboot-after-wsl', action='store_true',
+                       help='Disable automatic reboot after WSL installation')
 
     args = parser.parse_args()
 
@@ -920,7 +950,9 @@ def main():
         vm_size=args.vm_size,
         spot=not args.no_spot if args.no_spot else None,
         admin_username=args.admin_username,
-        admin_password=args.admin_password
+        admin_password=args.admin_password,
+        install_wsl=args.install_wsl,
+        reboot_after_wsl=not args.no_reboot_after_wsl if args.no_reboot_after_wsl else None
     )
 
     # Initialize manager

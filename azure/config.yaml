@@ -14,6 +14,10 @@ cpus: 8
 windows_version: '11'
 windows_featurepack: '25h2-ent'
 
+# WSL configuration
+install_wsl: true  # Install Windows Subsystem for Linux with Fedora Linux 43
+reboot_after_wsl: true  # Automatically reboot VM after WSL installation to complete setup
+
 # Pricing and resource options
 spot: true  # Use spot instances for cost savings
 
