@@ -1,0 +1,20 @@
+# Exclude sensitive files
+.env.secret
+
+# Exclude SSH keys (private keys are sensitive)
+*-ssh-key
+*-ssh-key.pub
+*.pem
+*.key
+
+# Exclude var directory (logs, state files, and other working data)
+var/
+
+# Legacy excludes (now moved to var/)
+*.log
+*_state.json
+
+# Exclude Python cache
+__pycache__/
+*.pyc
+*.pyo

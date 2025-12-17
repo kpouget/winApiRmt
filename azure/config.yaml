@@ -1,0 +1,25 @@
+# Azure VM Manager Configuration
+# This file contains non-sensitive configuration settings
+
+# Project configuration
+project_name: 'kpouget-windows-desktop-test'
+location: 'eastus'
+
+# VM specifications
+vm_size: 'Standard_D8s_v3'  # 8 CPUs, 32GB RAM, supports nested virtualization
+nested_virt: true
+cpus: 8
+
+# Windows configuration
+windows_version: '11'
+windows_featurepack: '25h2-ent'
+
+# Pricing and resource options
+spot: true  # Use spot instances for cost savings
+
+# Resource tags
+tags:
+  project: 'api-remoting'
+  user: 'kpouget'
+  org: 'crc'
+  run: 'dev'
