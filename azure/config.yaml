@@ -3,7 +3,7 @@
 
 # Project configuration
 project_name: 'kpouget-windows-desktop-test'
-location: 'eastus'
+location: 'francecentral'
 
 # VM specifications
 vm_size: 'Standard_D8s_v3'  # 8 CPUs, 32GB RAM, supports nested virtualization
