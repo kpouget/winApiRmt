@@ -93,9 +93,11 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VMBUS_CHANNEL_CONTEXT, GetChannelContext)
 
 /* Function declarations */
 DRIVER_INITIALIZE DriverEntry;
-EVT_WDF_DRIVER_DEVICE_ADD WinapiEvtDeviceAdd;
-EVT_WDF_DEVICE_CONTEXT_CLEANUP WinapiEvtDeviceContextCleanup;
-EVT_WDF_WORKITEM WinapiEvtWorkItem;
+
+/* Forward declarations */
+NTSTATUS WinapiEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit);
+VOID WinapiEvtDeviceContextCleanup(_In_ WDFOBJECT Device);
+VOID WinapiEvtWorkItem(_In_ WDFWORKITEM WorkItem);
 
 /* API handler function declarations */
 NTSTATUS WinapiHandleEchoRequest(PWINAPI_MESSAGE_T Request, PWINAPI_MESSAGE_T Response);
@@ -116,7 +118,7 @@ DriverEntry(
         "WinAPI Remoting Driver: DriverEntry\n"));
 
     /* Initialize the driver configuration */
-    WDF_DRIVER_CONFIG_INIT(&config, WinapiEvtDeviceAdd);
+    WDF_DRIVER_CONFIG_INIT(&config, (PFN_WDF_DRIVER_DEVICE_ADD)WinapiEvtDeviceAdd);
 
     /* Create the driver object */
     status = WdfDriverCreate(
@@ -156,7 +158,7 @@ WinapiEvtDeviceAdd(
 
     /* Setup device context */
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VMBUS_CHANNEL_CONTEXT);
-    attributes.EvtCleanupCallback = WinapiEvtDeviceContextCleanup;
+    attributes.EvtCleanupCallback = (PFN_WDF_OBJECT_CONTEXT_CLEANUP)WinapiEvtDeviceContextCleanup;
 
     /* Create the device */
     status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
@@ -171,7 +173,7 @@ WinapiEvtDeviceAdd(
     channelContext->ChannelOpened = FALSE;
 
     /* Create work item for processing requests */
-    WDF_WORKITEM_CONFIG_INIT(&workItemConfig, WinapiEvtWorkItem);
+    WDF_WORKITEM_CONFIG_INIT(&workItemConfig, (PFN_WDF_WORKITEM)WinapiEvtWorkItem);
     WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     attributes.ParentObject = device;
 
