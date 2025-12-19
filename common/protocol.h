@@ -133,4 +133,18 @@ typedef struct {
 #define WINAPI_PAGE_SIZE 4096
 #define WINAPI_ALIGN_PAGE(x) WINAPI_ALIGN_UP(x, WINAPI_PAGE_SIZE)
 
+/* Windows driver-style type aliases */
+#ifdef _WIN32
+typedef winapi_message_header_t WINAPI_MESSAGE_HEADER_T, *PWINAPI_MESSAGE_HEADER_T;
+typedef winapi_message_t WINAPI_MESSAGE_T, *PWINAPI_MESSAGE_T;
+typedef winapi_buffer_desc_t WINAPI_BUFFER_DESC_T, *PWINAPI_BUFFER_DESC_T;
+typedef winapi_echo_request_t WINAPI_ECHO_REQUEST_T, *PWINAPI_ECHO_REQUEST_T;
+typedef winapi_echo_response_t WINAPI_ECHO_RESPONSE_T, *PWINAPI_ECHO_RESPONSE_T;
+typedef winapi_buffer_test_request_t WINAPI_BUFFER_TEST_REQUEST_T, *PWINAPI_BUFFER_TEST_REQUEST_T;
+typedef winapi_buffer_test_response_t WINAPI_BUFFER_TEST_RESPONSE_T, *PWINAPI_BUFFER_TEST_RESPONSE_T;
+typedef winapi_perf_test_request_t WINAPI_PERF_TEST_REQUEST_T, *PWINAPI_PERF_TEST_REQUEST_T;
+typedef winapi_perf_test_response_t WINAPI_PERF_TEST_RESPONSE_T, *PWINAPI_PERF_TEST_RESPONSE_T;
+#endif
+
 #endif /* WINAPI_REMOTING_PROTOCOL_H */
+
