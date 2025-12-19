@@ -78,37 +78,42 @@ echo.
 REM Check if test signing is enabled
 echo [1/4] Checking test signing status...
 bcdedit /enum {current} | find "testsigning" | find "Yes" >nul 2>&1
-if %errorLevel% neq 0 (
-    echo WARNING: Test signing is not enabled
-    echo.
-    echo This driver requires test signing for development/testing.
-    echo Would you like to enable it? (This requires a reboot)
-    echo.
-    set /p choice="Enable test signing? (Y/N): "
+set SIGNING_CHECK=%errorLevel%
+echo Debug: Test signing check result: %SIGNING_CHECK%
 
-    if /i "%choice%"=="Y" (
-        echo.
-        echo Enabling test signing...
-        bcdedit /set testsigning on
-        if %errorLevel% neq 0 (
-            echo ERROR: Failed to enable test signing
-            exit /b 1
-        )
-
-        echo.
-        echo Test signing enabled successfully.
-        echo REBOOT REQUIRED - Please restart Windows and run this script again.
-        echo.
-        exit /b 0
-    ) else (
-        echo.
-        echo WARNING: Continuing without test signing - installation may fail
-        echo.
-    )
-) else (
+if "%SIGNING_CHECK%"=="0" (
     echo [✓] Test signing is enabled
+    goto skip_signing_setup
 )
 
+echo WARNING: Test signing is not enabled
+echo.
+echo This driver requires test signing for development/testing.
+echo Would you like to enable it? (This requires a reboot)
+echo.
+set /p choice="Enable test signing? (Y/N): "
+
+if /i "%choice%"=="Y" (
+    echo.
+    echo Enabling test signing...
+    bcdedit /set testsigning on
+    if %errorLevel% neq 0 (
+        echo ERROR: Failed to enable test signing
+        exit /b 1
+    )
+
+    echo.
+    echo Test signing enabled successfully.
+    echo REBOOT REQUIRED - Please restart Windows and run this script again.
+    echo.
+    exit /b 0
+) else (
+    echo.
+    echo WARNING: Continuing without test signing - installation may fail
+    echo.
+)
+
+:skip_signing_setup
 echo.
 
 REM Install the driver

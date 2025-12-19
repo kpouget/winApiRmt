@@ -10,8 +10,16 @@ echo.
 REM Navigate to project root
 cd /d "%~dp0"
 
+REM Create build directories
+echo [0/3] Creating build directories...
+if not exist "x64" mkdir "x64"
+if not exist "x64\Debug" mkdir "x64\Debug"
+if not exist "x64\Release" mkdir "x64\Release"
+echo Build directories ready.
+echo.
+
 REM Clean old object files
-echo [1/3] Cleaning old object files...
+echo [1/4] Cleaning old object files...
 if exist "x64\Debug\*.obj" del "x64\Debug\*.obj"
 echo Done.
 echo.
@@ -33,7 +41,7 @@ if errorlevel 1 (
 )
 
 REM Compile source files
-echo [2/3] Compiling source files for x64...
+echo [2/4] Compiling source files for x64...
 cl.exe /c /kernel /GS- /Oi- /W3 ^
 /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km" ^
 /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\shared" ^
@@ -47,7 +55,6 @@ if errorlevel 1 (
     echo.
     echo *** COMPILATION FAILED ***
     echo Check the errors above and fix them.
-    pause
     exit /b 1
 )
 
@@ -55,7 +62,7 @@ echo Compilation successful.
 echo.
 
 REM Link the driver
-echo [3/3] Linking driver...
+echo [3/4] Linking driver...
 cd x64\Debug
 
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /MACHINE:X64 ^
@@ -70,11 +77,19 @@ if errorlevel 1 (
     echo *** LINKING FAILED ***
     echo Check the errors above and fix them.
     cd ..\..
-    pause
     exit /b 1
 )
 
 cd ..\..
+
+REM Verify build output
+echo [4/4] Verifying build output...
+if exist "x64\Debug\winApiRemoting.sys" (
+    echo [V] winApiRemoting.sys created successfully
+) else (
+    echo [X] ERROR: winApiRemoting.sys not found!
+    exit /b 1
+)
 
 echo.
 echo =====================================
