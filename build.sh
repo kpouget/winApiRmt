@@ -42,6 +42,7 @@ if command -v cmd.exe >/dev/null 2>&1; then
             echo "   • Quick Install (Windows): install_driver.cmd (run as Administrator)"
             echo "   • Manual Install: pnputil /add-driver winApiRemoting.inf /install"
             echo "   • Check Status: sc query winApiRemoting"
+            echo "   • Debug Signing Issues: debug_cert_signing.ps1 (run as Administrator)"
             echo "   • Test: Connect Linux guest via VMBus"
         else
             echo "❌ Build reported success but driver file not found"

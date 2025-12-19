@@ -1,0 +1,56 @@
+;
+; winApiRemoting_minimal.inf - Minimal unsigned driver INF
+; Stripped down version for unsigned development builds
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+; CatalogFile = winApiRemoting.cat  ; Uncomment this line if you create a signed catalog
+DriverVer   = 12/18/2025,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+winApiRemoting.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTAMD64
+
+[Standard.NTAMD64]
+%winApiRemoting.DeviceDesc% = winApiRemoting_Device, VMBUS\{6ac83d8f-6e16-4e5c-ab3d-fd8c5a4b7e21}
+
+[winApiRemoting_Device.NTAMD64]
+CopyFiles = File_Copy
+
+[File_Copy]
+winApiRemoting.sys
+
+;-------------- Service installation
+[winApiRemoting_Device.NTAMD64.Services]
+AddService = winApiRemoting,%SPSVCINST_ASSOCSERVICE%, winApiRemoting_Service_Inst
+
+; -------------- winApiRemoting driver install sections
+[winApiRemoting_Service_Inst]
+DisplayName    = %winApiRemoting.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\winApiRemoting.sys
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "API Remoting POC"
+DiskName = "winApiRemoting Installation Disk"
+winApiRemoting.DeviceDesc = "winApiRemoting Device"
+winApiRemoting.SVCDESC = "winApiRemoting Service"
