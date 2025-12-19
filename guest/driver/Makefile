@@ -4,7 +4,8 @@ obj-m += winapi_client.o
 winapi_client-objs := vmbus_client.o
 
 # Kernel build directory - adjust as needed
-KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
+# Check if ../kernel exists, otherwise use system default
+KERNEL_DIR ?= $(shell if [ -d "../kernel" ]; then echo "../kernel"; else echo "/lib/modules/$(shell uname -r)/build"; fi)
 
 # Build directory
 BUILD_DIR := $(shell pwd)

@@ -1,7 +1,12 @@
 #ifndef WINAPI_REMOTING_PROTOCOL_H
 #define WINAPI_REMOTING_PROTOCOL_H
 
+/* Handle both kernel and userspace environments */
+#ifdef __KERNEL__
+#include <linux/types.h>
+#else
 #include <stdint.h>
+#endif
 
 /* Protocol version */
 #define WINAPI_PROTOCOL_VERSION 1

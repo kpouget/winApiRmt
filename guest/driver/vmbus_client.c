@@ -26,6 +26,7 @@
 #define CLASS_NAME  "winapi_remoting"
 
 /* VMBus device GUID - must match host driver */
+#define HV_WINAPI_GUID "{6ac83d8f-6e16-4e5c-ab3d-fd8c5a4b7e21}"
 static const uuid_le winapi_guid = UUID_LE(0x6ac83d8f, 0x6e16, 0x4e5c,
                                            0xab, 0x3d, 0xfd, 0x8c, 0x5a, 0x4b, 0x7e, 0x21);
 
@@ -102,7 +103,7 @@ static struct winapi_device *g_winapi_dev = NULL;
 
 /* Forward declarations */
 static int winapi_probe(struct hv_device *hv_dev, const struct hv_vmbus_device_id *dev_id);
-static int winapi_remove(struct hv_device *hv_dev);
+static void winapi_remove(struct hv_device *hv_dev);
 static void winapi_channel_callback(void *context);
 
 /* VMBus driver structure */
@@ -509,19 +510,29 @@ static void winapi_channel_callback(void *context)
     unsigned long flags;
     bool found = false;
 
-    while ((desc = get_next_pkt_raw(dev->channel)) != NULL) {
-        if (desc->type != VM_PKT_DATA_INBAND) {
-            put_pkt_raw(dev->channel, desc);
-            continue;
+    void *buffer;
+    u32 buffer_len = 1024; /* Initial buffer size */
+    u64 req_id;
+    int ret;
+
+    buffer = kmalloc(buffer_len, GFP_ATOMIC);
+    if (!buffer) {
+        pr_err("winapi: Failed to allocate receive buffer\n");
+        return;
+    }
+
+    while ((ret = vmbus_recvpacket(dev->channel, buffer, buffer_len, &buffer_len, &req_id)) == 0 && buffer_len > 0) {
+        if (buffer_len < sizeof(winapi_message_t)) {
+            pr_err("winapi: Received packet too small\n");
+            goto next_packet;
         }
 
-        message = (winapi_message_t *)((u8 *)desc + desc->offset8 * 8);
+        message = (winapi_message_t *)buffer;
 
         /* Validate message */
         if (message->header.magic != WINAPI_MESSAGE_MAGIC) {
             pr_err("winapi: Invalid message magic\n");
-            put_pkt_raw(dev->channel, desc);
-            continue;
+            goto next_packet;
         }
 
         /* Find pending request */
@@ -542,8 +553,12 @@ static void winapi_channel_callback(void *context)
                    message->header.request_id);
         }
 
-        put_pkt_raw(dev->channel, desc);
+next_packet:
+        /* Reset buffer_len for next packet */
+        buffer_len = 1024;
     }
+
+    kfree(buffer);
 }
 
 /* VMBus probe function */
@@ -596,7 +611,7 @@ static int winapi_probe(struct hv_device *hv_dev, const struct hv_vmbus_device_i
     }
 
     /* Create device class */
-    dev->dev_class = class_create(THIS_MODULE, CLASS_NAME);
+    dev->dev_class = class_create(CLASS_NAME);
     if (IS_ERR(dev->dev_class)) {
         ret = PTR_ERR(dev->dev_class);
         pr_err("winapi: Failed to create device class: %d\n", ret);
@@ -630,7 +645,7 @@ error_free_dev:
 }
 
 /* VMBus remove function */
-static int winapi_remove(struct hv_device *hv_dev)
+static void winapi_remove(struct hv_device *hv_dev)
 {
     struct winapi_device *dev = hv_get_drvdata(hv_dev);
 
@@ -649,8 +664,6 @@ static int winapi_remove(struct hv_device *hv_dev)
         g_winapi_dev = NULL;
         kfree(dev);
     }
-
-    return 0;
 }
 
 /* Module initialization */

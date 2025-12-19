@@ -38,7 +38,7 @@ echo "✅ WSL2 environment detected"
 
 # Check and install required packages
 echo "🔧 Checking required packages..."
-REQUIRED_PACKAGES=("make" "bc" "git" "gcc" "flex" "bison" "elfutils-libelf-devel" "awk")
+REQUIRED_PACKAGES=("make" "bc" "git" "gcc" "flex" "bison" "elfutils-libelf-devel" "awk" "openssl-devel" "openssl-libs" "openssl" "zlib-devel" "ncurses-devel" "pahole" "which" "findutils" "perl" "python3")
 MISSING_PACKAGES=()
 
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -125,6 +125,13 @@ check_kernel_setup() {
         return 1
     fi
 
+    # Check if Module.symvers exists (needed for symbol resolution)
+    if [ ! -f "Module.symvers" ]; then
+        echo "⚠️  Module.symvers missing - may need regeneration"
+        cd ..
+        return 1
+    fi
+
     cd ..
     echo "✅ Kernel setup is already complete and up to date"
     return 0
@@ -142,10 +149,34 @@ if check_kernel_setup; then
     exit 0
 fi
 
-# Remove any existing incomplete kernel directory
+# Handle existing kernel directory
 if [ -d "kernel" ]; then
-    echo "🗑️  Removing incomplete kernel directory..."
-    rm -rf kernel
+    echo "⚠️  Existing kernel directory detected"
+    echo "   The setup validation failed, but the directory exists"
+    echo
+    echo "Options:"
+    echo "   1. Continue setup (may overwrite some files)"
+    echo "   2. Exit and let you fix manually"
+    echo "   3. Remove directory and start fresh"
+    echo
+    read -p "Choose option (1/2/3): " choice
+    case $choice in
+        1)
+            echo "Continuing with existing directory..."
+            ;;
+        2)
+            echo "Exiting for manual fix. Check kernel/ directory."
+            exit 0
+            ;;
+        3)
+            echo "Removing kernel directory..."
+            rm -rf kernel
+            ;;
+        *)
+            echo "Invalid choice. Exiting."
+            exit 1
+            ;;
+    esac
 fi
 
 # Clone WSL2 kernel repository with specific tag
@@ -180,6 +211,15 @@ make modules_prepare
 echo "   Running 'make scripts'..."
 make scripts
 
+# Generate Module.symvers for symbol resolution
+echo "   Generating Module.symvers for VMBus modules..."
+if make M=drivers/hv modules >/dev/null 2>&1; then
+    echo "   ✅ Module.symvers generated successfully"
+else
+    echo "   ⚠️  Module.symvers generation failed - using fallback"
+    echo "   Driver build may show symbol warnings"
+fi
+
 # Create a completion marker
 echo "$(date): Kernel setup completed for ${WSL2_TAG} on ${LIVE_KERNEL_VERSION}" > .kernel_setup_complete
 
@@ -197,12 +237,32 @@ echo "   CONFIG_HYPERV: $(grep '^CONFIG_HYPERV=' .config || echo 'NOT SET')"
 echo "   CONFIG_HYPERV_VMBUS: $(grep '^CONFIG_HYPERV_VMBUS=' .config || echo 'NOT SET')"
 
 # Final verification
+echo
+echo "🔍 Final build environment verification:"
+if [ -f "scripts/mod/modpost" ]; then
+    echo "   ✅ modpost tool ready"
+else
+    echo "   ❌ modpost tool missing"
+fi
+
+if [ -f ".config" ]; then
+    echo "   ✅ Kernel configuration ready"
+else
+    echo "   ❌ Kernel configuration missing"
+fi
+
+if [ -f "Module.symvers" ]; then
+    echo "   ✅ Symbol table ready ($(wc -l < Module.symvers) symbols)"
+else
+    echo "   ❌ Symbol table missing"
+fi
+
 if [ -f "scripts/mod/modpost" ] && [ -f ".config" ] && [ -f "Module.symvers" ]; then
     echo
     echo "✅ All build prerequisites verified!"
 else
     echo
-    echo "⚠️  Some build files may be missing - build might fail"
+    echo "⚠️  Some build files may be missing - build might show warnings"
 fi
 
 echo

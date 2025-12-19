@@ -5,6 +5,9 @@
  * API calls to the Windows host via the VMBus driver.
  */
 
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200112L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -226,8 +229,9 @@ int winapi_alloc_buffer(winapi_buffer_t *buffer, size_t size)
     }
 
     /* Allocate page-aligned memory for better performance */
-    buffer->data = aligned_alloc(4096, (size + 4095) & ~4095);
-    if (!buffer->data) {
+    size_t aligned_size = (size + 4095) & ~4095;
+    int ret = posix_memalign(&buffer->data, 4096, aligned_size);
+    if (ret != 0 || !buffer->data) {
         return -1;
     }
 
