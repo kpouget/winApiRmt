@@ -94,7 +94,7 @@ static int test_buffer_operations(winapi_handle_t handle)
         }
 
         /* Test 1: Write pattern to buffer */
-        printf("  Writing test pattern...");
+        printf("  Writing test pattern...\n");
         if (winapi_buffer_test(handle, &buffer, 1, WINAPI_BUFFER_OP_WRITE,
                               test_pattern, &result) < 0) {
             printf(" FAILED\n");
@@ -106,7 +106,7 @@ static int test_buffer_operations(winapi_handle_t handle)
                (unsigned long long)result.bytes_processed, result.checksum);
 
         /* Test 2: Verify pattern in buffer */
-        printf("  Verifying test pattern...");
+        printf("  Verifying test pattern...\n");
         if (winapi_buffer_test(handle, &buffer, 1, WINAPI_BUFFER_OP_VERIFY,
                               test_pattern, &result) < 0) {
             printf(" FAILED\n");
@@ -122,7 +122,7 @@ static int test_buffer_operations(winapi_handle_t handle)
         }
 
         /* Test 3: Read buffer and get checksum */
-        printf("  Reading buffer checksum...");
+        printf("  Reading buffer checksum...\n");
         if (winapi_buffer_test(handle, &buffer, 1, WINAPI_BUFFER_OP_READ,
                               0, &result) < 0) {
             printf(" FAILED\n");
@@ -163,7 +163,7 @@ static int test_multi_buffer(winapi_handle_t handle)
     }
 
     /* Write pattern to all buffers */
-    printf("Writing test pattern to all buffers...");
+    printf("Writing test pattern to all buffers...\n");
     if (winapi_buffer_test(handle, buffers, 4, WINAPI_BUFFER_OP_WRITE,
                           test_pattern, &result) < 0) {
         printf(" FAILED\n");
@@ -174,7 +174,7 @@ static int test_multi_buffer(winapi_handle_t handle)
     printf("  Combined checksum: 0x%08x\n", result.checksum);
 
     /* Verify pattern in all buffers */
-    printf("Verifying test pattern in all buffers...");
+    printf("Verifying test pattern in all buffers...\n");
     if (winapi_buffer_test(handle, buffers, 4, WINAPI_BUFFER_OP_VERIFY,
                           test_pattern, &result) < 0) {
         printf(" FAILED\n");

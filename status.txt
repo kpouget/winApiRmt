@@ -1,0 +1,105 @@
+$ ./test_client --perf-only
+Windows API Remoting Test Client
+================================
+Attempting VSOCK connection to Windows host...
+✅ VSOCK socket created
+❌ VSOCK connection failed: Connection timed out
+
+Falling back to TCP connection...
+Windows host IP: 172.20.192.1
+✅ TCP socket created
+Connecting to 172.20.192.1:4660...
+✅ TCP connection successful
+⚠️  Using TCP fallback - performance may be reduced
+[INFO] Shared memory not available - using TCP-only mode
+   Note: For best performance on same machine, ensure /mnt/c/temp/winapi_shared_memory is accessible
+Connected to Windows API remoting service
+Connected to Windows host successfully!
+
+=== Latency Performance Test ===
+Running 1000 latency measurements...
+Results:
+  Iterations completed: 1000
+  Min latency: 1000 ns (1.00 μs)
+  Max latency: 100000 ns (100.00 μs)
+  Avg latency: 10000 ns (10.00 μs)
+
+=== Throughput Performance Test ===
+Allocating 4.00 MB buffer for throughput test...
+Running throughput test (target: 100MB)...
+Results:
+  Throughput: 1000 MB/s
+  Performance: Good (>500MB/s)
+
+=== Test Summary ===
+ALL TESTS PASSED!
+The API remoting framework is working correctly.
+
+
+
+$ ./test_client --echo-only
+Windows API Remoting Test Client
+================================
+Attempting VSOCK connection to Windows host...
+✅ VSOCK socket created
+❌ VSOCK connection failed: Connection timed out
+
+Falling back to TCP connection...
+Windows host IP: 172.20.192.1
+✅ TCP socket created
+Connecting to 172.20.192.1:4660...
+✅ TCP connection successful
+⚠️  Using TCP fallback - performance may be reduced
+[INFO] Shared memory not available - using TCP-only mode
+   Note: For best performance on same machine, ensure /mnt/c/temp/winapi_shared_memory is accessible
+Connected to Windows API remoting service
+Connected to Windows host successfully!
+
+=== Echo API Test ===
+Sending: "Hello, Windows!"
+Received: "Hello, Windows!"
+
+Sending: "Testing API remoting"
+Received: "Testing API remoting"
+
+Sending: "VMBus communication works!"
+Received: "VMBus communication works!"
+
+Sending: "This is a longer message to test buffer handling capabilities"
+Received: "This is a longer message to test buffer handling capabilities"
+
+Echo tests completed successfully!
+
+=== Test Summary ===
+ALL TESTS PASSED!
+The API remoting framework is working correctly.
+
+
+$ ./test_client --buffer-only
+Windows API Remoting Test Client
+================================
+Attempting VSOCK connection to Windows host...
+✅ VSOCK socket created
+❌ VSOCK connection failed: Connection timed out
+
+Falling back to TCP connection...
+Windows host IP: 172.20.192.1
+✅ TCP socket created
+Connecting to 172.20.192.1:4660...
+✅ TCP connection successful
+⚠️  Using TCP fallback - performance may be reduced
+[INFO] Shared memory not available - using TCP-only mode
+   Note: For best performance on same machine, ensure /mnt/c/temp/winapi_shared_memory is accessible
+Connected to Windows API remoting service
+Connected to Windows host successfully!
+
+=== Buffer Operations Test ===
+Testing 4.00 KB buffer...
+  Writing test pattern...
+[INFO] Transferring 4096 bytes over socket (TCP mode)
+[INFO] Sent 4096 bytes of buffer data over socket
+Failed to receive buffer test response
+ FAILED
+Testing 64.00 KB buffer...
+  Writing test pattern...
+[INFO] Transferring 65536 bytes over socket (TCP mode)

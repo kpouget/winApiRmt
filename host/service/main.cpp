@@ -106,6 +106,16 @@ void CleanupService();
 DWORD HandleClient(SOCKET client_socket);
 DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* response_json, size_t response_size);
 
+// Safe memory write with SEH
+BOOL SafeMemoryWrite(UINT32* ptr, UINT32 value, UINT64 offset);
+
+// Structure to pass buffer send info
+struct BufferSendInfo {
+    BOOL needs_buffer_send;
+    UINT64 buffer_size;
+    UINT32 test_pattern;
+};
+
 // JSON helper functions
 Json::Value CreateErrorResponse(UINT32 request_id, const char* error_msg);
 Json::Value CreateSuccessResponse(UINT32 request_id);
@@ -114,6 +124,22 @@ Json::Value CreateSuccessResponse(UINT32 request_id);
 DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
+
+/*
+ * Safe memory write with SEH
+ */
+BOOL SafeMemoryWrite(UINT32* ptr, UINT32 value, UINT64 offset)
+{
+    __try {
+        *ptr = value;
+        return TRUE;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        printf("[ERROR] SafeMemoryWrite: Access violation at offset %I64u, address %p\n", offset, ptr);
+        printf("[ERROR] SafeMemoryWrite: Exception code: 0x%08X\n", GetExceptionCode());
+        return FALSE;
+    }
+}
 
 /*
  * Service entry point
@@ -269,16 +295,44 @@ DWORD InitializeService()
         return GetLastError();
     }
 
-    // Create shared memory
+    // Create shared memory using file-backed mapping for WSL2 compatibility
     printf("Creating shared memory (%d MB)...\n", SHARED_MEMORY_SIZE / (1024*1024));
+
+    // Open the shared memory file (must be created first)
+    HANDLE file_handle = CreateFile(
+        L"C:\\temp\\winapi_shared_memory",
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,           // File must already exist
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+
+    if (file_handle == INVALID_HANDLE_VALUE) {
+        printf("Failed to open shared memory file C:\\temp\\winapi_shared_memory: %d\n", GetLastError());
+        printf("Please create the file first using: enable-tcp-shared-memory.ps1\n");
+        printf("Or manually: fsutil file createnew C:\\temp\\winapi_shared_memory %d\n", SHARED_MEMORY_SIZE);
+        CloseHandle(g_ctx.stop_event);
+        WSACleanup();
+        return GetLastError();
+    }
+
+    printf("Opened shared memory file: C:\\temp\\winapi_shared_memory\n");
+    printf("File-backed shared memory enabled for TCP + zero-copy mode\n");
+
+    // Create file-backed mapping
     g_ctx.shared_memory_handle = CreateFileMapping(
-        INVALID_HANDLE_VALUE,
+        file_handle,             // Use actual file instead of memory-only
         NULL,
         PAGE_READWRITE,
         0,
         SHARED_MEMORY_SIZE,
-        SHARED_MEMORY_NAME
+        NULL                     // No name needed for file-backed mapping
     );
+
+    // Close file handle (mapping keeps it alive)
+    CloseHandle(file_handle);
 
     if (g_ctx.shared_memory_handle == NULL) {
         printf("CreateFileMapping failed: %d\n", GetLastError());
@@ -551,6 +605,7 @@ DWORD HandleClient(SOCKET client_socket)
     char response_buffer[65536];
     UINT32 msg_len;
     int bytes_received;
+    int request_count = 0;
 
     while (TRUE) {
         // Receive message length
@@ -571,16 +626,64 @@ DWORD HandleClient(SOCKET client_socket)
         }
 
         request_buffer[msg_len] = '\0';
+        request_count++;
 
         // Process request
-        if (ProcessAPIRequest(client_socket, request_buffer, response_buffer, sizeof(response_buffer)) == ERROR_SUCCESS) {
+        DWORD result = ProcessAPIRequest(client_socket, request_buffer, response_buffer, sizeof(response_buffer));
+
+        if (result == ERROR_SUCCESS) {
             // Send response
             UINT32 response_len = (UINT32)strlen(response_buffer);
             UINT32 net_len = htonl(response_len);
 
-            if (send(client_socket, (char*)&net_len, sizeof(net_len), 0) == sizeof(net_len)) {
-                send(client_socket, response_buffer, response_len, 0);
+            int sent = send(client_socket, (char*)&net_len, sizeof(net_len), 0);
+            if (sent != sizeof(net_len)) {
+                break;
             }
+
+            sent = send(client_socket, response_buffer, response_len, 0);
+            if (sent != (int)response_len) {
+                break;
+            }
+
+            // Check if we need to send buffer data for READ operations
+            Json::Value parsed_response;
+            Json::Reader response_reader;
+            if (response_reader.parse(response_buffer, parsed_response)) {
+                Json::Value result_section = parsed_response.get("result", Json::Value());
+                if (!result_section.isNull() && result_section.isMember("needs_buffer_send") && result_section.get("needs_buffer_send", false).asBool()) {
+                    uint64_t buffer_size = result_section.get("buffer_size", 0).asUInt64();
+                    uint32_t test_pattern = result_section.get("test_pattern", 0).asUInt();
+
+                    // Generate and send buffer data
+                    uint32_t* pattern_buffer = new uint32_t[buffer_size / sizeof(uint32_t)];
+                    uint64_t uint32_count = buffer_size / sizeof(uint32_t);
+
+                    for (uint64_t i = 0; i < uint32_count; i++) {
+                        pattern_buffer[i] = test_pattern;
+                    }
+
+                    // Send buffer data in chunks
+                    char* send_ptr = (char*)pattern_buffer;
+                    size_t total_sent = 0;
+                    while (total_sent < buffer_size) {
+                        size_t chunk_size = min(buffer_size - total_sent, 65536ULL); // 64KB chunks
+                        int chunk_sent = send(client_socket, send_ptr + total_sent, (int)chunk_size, 0);
+                        if (chunk_sent <= 0) {
+                            delete[] pattern_buffer;
+                            return ERROR_SUCCESS;
+                        }
+                        total_sent += chunk_sent;
+                    }
+                    delete[] pattern_buffer;
+                }
+            }
+        } else {
+            // Send error response
+            UINT32 response_len = (UINT32)strlen(response_buffer);
+            UINT32 net_len = htonl(response_len);
+            send(client_socket, (char*)&net_len, sizeof(net_len), 0);
+            send(client_socket, response_buffer, response_len, 0);
         }
     }
 
@@ -596,9 +699,12 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
     Json::Reader reader;
     Json::StreamWriterBuilder builder;
 
+    printf("[DEBUG] Parsing JSON request...\n");
+
     // Parse request
     if (!reader.parse(request_json, request)) {
-        strncpy(response_json, "{\"error\":\"Invalid JSON\"}", response_size - 1);
+        printf("[ERROR] JSON parsing failed: %s\n", reader.getFormattedErrorMessages().c_str());
+        strncpy(response_json, "{\"error\":\"Invalid JSON\",\"details\":\"JSON parsing failed\"}", response_size - 1);
         response_json[response_size - 1] = '\0';
         return ERROR_INVALID_DATA;
     }
@@ -607,6 +713,17 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
     std::string api = request.get("api", "").asString();
     UINT32 request_id = request.get("request_id", 0).asUInt();
 
+    printf("[DEBUG] Processing API: '%s', request_id: %u\n", api.c_str(), request_id);
+
+    if (api.empty()) {
+        printf("[ERROR] Missing API name in request\n");
+        response = CreateErrorResponse(request_id, "Missing API name");
+        std::string response_str = Json::writeString(builder, response);
+        strncpy(response_json, response_str.c_str(), response_size - 1);
+        response_json[response_size - 1] = '\0';
+        return ERROR_INVALID_PARAMETER;
+    }
+
     // Process based on API
     DWORD result = ERROR_SUCCESS;
 
@@ -614,7 +731,20 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
         result = HandleEchoAPI(client_socket, request, response);
     }
     else if (api == "buffer_test") {
-        result = HandleBufferTestAPI(client_socket, request, response);
+        printf("[DEBUG] About to call HandleBufferTestAPI\n");
+        fflush(stdout);
+        try {
+            result = HandleBufferTestAPI(client_socket, request, response);
+            printf("[DEBUG] HandleBufferTestAPI completed successfully\n");
+        } catch (const std::exception& e) {
+            printf("[ERROR] Exception in HandleBufferTestAPI: %s\n", e.what());
+            response = CreateErrorResponse(request_id, "Server exception occurred");
+            result = ERROR_INVALID_FUNCTION;
+        } catch (...) {
+            printf("[ERROR] Unknown exception in HandleBufferTestAPI\n");
+            response = CreateErrorResponse(request_id, "Unknown server exception");
+            result = ERROR_INVALID_FUNCTION;
+        }
     }
     else if (api == "performance") {
         result = HandlePerformanceAPI(client_socket, request, response);
@@ -676,9 +806,40 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
 {
     UINT32 request_id = request.get("request_id", 0).asUInt();
     int operation = request.get("operation", 0).asInt();
-    UINT32 test_pattern = request.get("test_pattern", 0).asUInt();
+
+    UINT32 test_pattern;
+    try {
+        // Handle both signed and unsigned values from JSON
+        if (request["test_pattern"].isInt()) {
+            test_pattern = (UINT32)request.get("test_pattern", 0).asInt();
+        } else {
+            test_pattern = request.get("test_pattern", 0).asUInt();
+        }
+    } catch (...) {
+        response = CreateErrorResponse(request_id, "JSON parsing error - test_pattern");
+        return ERROR_INVALID_DATA;
+    }
+
     UINT64 payload_size = request.get("payload_size", 0).asUInt64();
-    bool socket_transfer = request.get("socket_transfer", false).asBool();
+
+    BOOL socket_transfer;
+    try {
+        socket_transfer = request.get("socket_transfer", false).asBool() ? TRUE : FALSE;
+    } catch (...) {
+        response = CreateErrorResponse(request_id, "JSON parsing error");
+        return ERROR_INVALID_DATA;
+    }
+
+    // Validate parameters
+    if (payload_size == 0) {
+        response = CreateErrorResponse(request_id, "Invalid payload size");
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (socket_transfer && payload_size > 64 * 1024 * 1024) {  // 64MB limit for socket transfer
+        response = CreateErrorResponse(request_id, "Payload too large for socket transfer");
+        return ERROR_INVALID_PARAMETER;
+    }
 
     response = CreateSuccessResponse(request_id);
 
@@ -691,20 +852,37 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
     switch (operation) {
         case WINAPI_BUFFER_OP_READ:
             if (socket_transfer) {
-                // Send buffer data over socket
-                printf("[INFO] Sending %llu bytes over socket (TCP mode)\n", payload_size);
-                UINT32* pattern_buffer = new UINT32[payload_size / sizeof(UINT32)];
-                for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
-                    pattern_buffer[i] = test_pattern;
-                }
-                // Note: Data will be sent after JSON response
-                delete[] pattern_buffer;
+                // Store info for buffer sending after JSON response
+                result["needs_buffer_send"] = true;
+                result["buffer_size"] = (Json::UInt64)payload_size;
+                result["test_pattern"] = test_pattern;
             } else if (payload_size <= RESPONSE_BUFFER_SIZE) {
+                if (!g_ctx.response_buffer) {
+                    response = CreateErrorResponse(request_id, "Shared memory response buffer not available");
+                    return ERROR_INVALID_HANDLE;
+                }
+
                 // Fill response buffer with test pattern (shared memory)
                 UINT32* buf = (UINT32*)g_ctx.response_buffer;
-                for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
-                    buf[i] = test_pattern;
+                UINT64 uint32_count = payload_size / sizeof(UINT32);
+
+                for (UINT64 i = 0; i < uint32_count; i++) {
+                    UINT64 byte_offset = i * sizeof(UINT32);
+                    if (byte_offset + sizeof(UINT32) > RESPONSE_BUFFER_SIZE) {
+                        break; // Stop before exceeding buffer
+                    }
+
+                    if (byte_offset > 4180000) {  // Use safe write near boundary
+                        if (!SafeMemoryWrite(&buf[i], test_pattern, byte_offset)) {
+                            break;
+                        }
+                    } else {
+                        buf[i] = test_pattern;
+                    }
                 }
+            } else {
+                response = CreateErrorResponse(request_id, "Payload too large for shared memory response");
+                return ERROR_INVALID_PARAMETER;
             }
             break;
 
@@ -712,13 +890,30 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
         case WINAPI_BUFFER_OP_VERIFY:
             if (socket_transfer) {
                 // Receive buffer data over socket
-                printf("[INFO] Receiving %llu bytes over socket (TCP mode)\n", payload_size);
-                char* temp_buffer = new char[payload_size];
+                if (payload_size > 64 * 1024 * 1024) {
+                    response = CreateErrorResponse(request_id, "Payload too large");
+                    return ERROR_INVALID_PARAMETER;
+                }
+
+                char* temp_buffer = nullptr;
+                try {
+                    temp_buffer = new char[payload_size];
+                } catch (...) {
+                    response = CreateErrorResponse(request_id, "Memory allocation failed");
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+
                 int total_received = 0;
-                while (total_received < payload_size) {
-                    int received = recv(client_socket, temp_buffer + total_received,
-                                      (int)(payload_size - total_received), 0);
-                    if (received <= 0) break;
+                while (total_received < (int)payload_size) {
+                    int bytes_remaining = (int)(payload_size - total_received);
+                    int bytes_to_receive = min(bytes_remaining, 65536);  // 64KB chunks
+
+                    int received = recv(client_socket, temp_buffer + total_received, bytes_to_receive, 0);
+                    if (received <= 0) {
+                        delete[] temp_buffer;
+                        response = CreateErrorResponse(request_id, "Socket receive failed");
+                        return ERROR_NETWORK_UNREACHABLE;
+                    }
                     total_received += received;
                 }
 
@@ -730,15 +925,22 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
                 }
                 result["checksum"] = checksum;
                 delete[] temp_buffer;
-                printf("[INFO] Received %d bytes, checksum: 0x%08X\n", total_received, checksum);
             } else if (payload_size <= REQUEST_BUFFER_SIZE) {
                 // Verify data in request buffer (shared memory)
+                if (!g_ctx.request_buffer) {
+                    response = CreateErrorResponse(request_id, "Shared memory not available");
+                    return ERROR_INVALID_HANDLE;
+                }
+
                 UINT32* buf = (UINT32*)g_ctx.request_buffer;
                 UINT32 checksum = 0;
                 for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
                     checksum ^= buf[i];
                 }
                 result["checksum"] = checksum;
+            } else {
+                response = CreateErrorResponse(request_id, "Payload too large for shared memory");
+                return ERROR_INVALID_PARAMETER;
             }
             break;
     }

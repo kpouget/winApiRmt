@@ -162,7 +162,7 @@ static json_object* receive_json_response(int socket_fd) {
 winapi_handle_t winapi_init(void)
 {
     struct winapi_context *ctx;
-    struct sockaddr_vm vsock_addr;
+    //struct sockaddr_vm vsock_addr;
     struct sockaddr_in tcp_addr;
     char host_ip[64];
     int fd;
@@ -177,7 +177,12 @@ winapi_handle_t winapi_init(void)
     ctx->socket_fd = -1;
     ctx->next_request_id = 1;
 
-    // Try VSOCK first (optimal performance)
+    // Skip VSOCK and go directly to TCP for debugging
+    printf("Skipping VSOCK, using TCP connection directly...\n");
+    vsock_failed = 1;
+
+    /*
+    // Try VSOCK first (optimal performance) - DISABLED FOR DEBUGGING
     printf("Attempting VSOCK connection to Windows host...\n");
     fd = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -202,10 +207,11 @@ winapi_handle_t winapi_init(void)
             ctx->is_connected = 1;
         }
     }
+    */
 
     // Fallback to TCP if VSOCK failed
     if (vsock_failed) {
-        printf("\nFalling back to TCP connection...\n");
+        printf("Using TCP connection...\n");
 
         // Get Windows host IP
         if (get_windows_host_ip(host_ip, sizeof(host_ip)) < 0) {
@@ -295,7 +301,7 @@ winapi_handle_t winapi_init(void)
         }
 
         printf("✅ TCP connection successful\n");
-        printf("⚠️  Using TCP fallback - performance may be reduced\n");
+        printf("ℹ️  Using TCP mode - checking for shared memory...\n");
         ctx->socket_fd = fd;
         ctx->is_connected = 1;
     }
@@ -303,37 +309,26 @@ winapi_handle_t winapi_init(void)
     // Try to map shared memory (works for both VSOCK and TCP on same machine)
     int shm_fd = open(SHARED_MEMORY_PATH, O_RDWR);
     if (shm_fd < 0) {
-        if (vsock_failed) {
-            printf("[INFO] Shared memory not available - using TCP-only mode\n");
-            printf("   Note: For best performance on same machine, ensure %s is accessible\n", SHARED_MEMORY_PATH);
-            ctx->shared_memory = NULL;
-            ctx->header = NULL;
-            ctx->request_buffer = NULL;
-            ctx->response_buffer = NULL;
-        } else {
-            printf("Failed to open shared memory: %s\n", strerror(errno));
-            close(fd);
-            free(ctx);
-            return NULL;
-        }
+        printf("❌ Shared memory not available - using TCP-only mode\n");
+        printf("   File not found: %s\n", SHARED_MEMORY_PATH);
+        printf("   Error: %s\n", strerror(errno));
+        printf("   Note: For zero-copy performance, ensure shared memory file exists\n");
+        ctx->shared_memory = NULL;
+        ctx->header = NULL;
+        ctx->request_buffer = NULL;
+        ctx->response_buffer = NULL;
     } else {
         ctx->shared_memory = mmap(NULL, SHARED_MEMORY_SIZE, PROT_READ | PROT_WRITE,
                                   MAP_SHARED, shm_fd, 0);
         close(shm_fd);
 
         if (ctx->shared_memory == MAP_FAILED) {
-            if (vsock_failed) {
-                printf("[WARN] Shared memory mapping failed for TCP connection - using socket-only mode\n");
-                ctx->shared_memory = NULL;
-                ctx->header = NULL;
-                ctx->request_buffer = NULL;
-                ctx->response_buffer = NULL;
-            } else {
-                printf("Failed to map shared memory: %s\n", strerror(errno));
-                close(fd);
-                free(ctx);
-                return NULL;
-            }
+            printf("❌ Shared memory mapping failed - using TCP-only mode\n");
+            printf("   Error: %s\n", strerror(errno));
+            ctx->shared_memory = NULL;
+            ctx->header = NULL;
+            ctx->request_buffer = NULL;
+            ctx->response_buffer = NULL;
         } else {
             // Set up memory layout
             ctx->header = (struct shared_memory_header*)ctx->shared_memory;
@@ -349,11 +344,8 @@ winapi_handle_t winapi_init(void)
                 free(ctx);
                 return NULL;
             }
-            if (vsock_failed) {
-                printf("[OK] Shared memory connected for zero-copy transfers (TCP + shared memory hybrid)\n");
-            } else {
-                printf("[OK] Shared memory connected for zero-copy transfers\n");
-            }
+            printf("✅ Shared memory connected for zero-copy transfers (TCP + shared memory hybrid)\n");
+            printf("   Magic verified: 0x%X\n", ctx->header->magic);
         }
     }
 
@@ -461,15 +453,25 @@ int winapi_buffer_test(winapi_handle_t handle,
         total_size += buffers[i].size;
     }
 
-    // Check buffer size only if shared memory is available
-    if (ctx->request_buffer && total_size > REQUEST_BUFFER_SIZE) {
-        fprintf(stderr, "Total buffer size too large: %lu > %d\n", total_size, REQUEST_BUFFER_SIZE);
-        return -1;
+    // Determine transfer method based on buffer size and shared memory availability
+    int use_socket_transfer;
+    if (!ctx->request_buffer) {
+        // No shared memory available, must use socket
+        use_socket_transfer = 1;
+        printf("[INFO] Using socket transfer (no shared memory available)\n");
+    } else if (total_size > REQUEST_BUFFER_SIZE) {
+        // Buffer too large for shared memory, use socket transfer
+        use_socket_transfer = 1;
+        printf("[INFO] Using socket transfer (buffer %zu bytes > shared memory %d bytes)\n", total_size, REQUEST_BUFFER_SIZE);
+    } else {
+        // Use shared memory for optimal performance
+        use_socket_transfer = 0;
+        printf("[INFO] Using shared memory transfer (%zu bytes)\n", total_size);
     }
 
     // Handle buffer data transfer
     if (operation == WINAPI_BUFFER_OP_WRITE || operation == WINAPI_BUFFER_OP_VERIFY) {
-        if (ctx->request_buffer) {
+        if (!use_socket_transfer) {
             // Use shared memory (zero-copy)
             size_t offset = 0;
             for (i = 0; i < buffer_count; i++) {
@@ -477,9 +479,7 @@ int winapi_buffer_test(winapi_handle_t handle,
                 offset += buffers[i].size;
             }
         } else {
-            // Use socket transfer for TCP connections
-            printf("[INFO] Transferring %lu bytes over socket (TCP mode)\n", total_size);
-            // Buffer data will be sent after JSON request
+            // Use socket transfer - buffer data will be sent after JSON request
         }
     }
 
@@ -487,7 +487,7 @@ int winapi_buffer_test(winapi_handle_t handle,
     request_id = ctx->next_request_id++;
     request = create_request("buffer_test", request_id);
     op_obj = json_object_new_int(operation);
-    pattern_obj = json_object_new_int(test_pattern);
+    pattern_obj = json_object_new_int64((int64_t)test_pattern);  // Ensure unsigned values are handled correctly
     size_obj = json_object_new_int64(total_size);
 
     json_object_object_add(request, "operation", op_obj);
@@ -495,32 +495,35 @@ int winapi_buffer_test(winapi_handle_t handle,
     json_object_object_add(request, "payload_size", size_obj);
 
     // Add flag for socket buffer transfer
-    json_object *socket_transfer_obj = json_object_new_boolean(ctx->request_buffer == NULL);
+    json_object *socket_transfer_obj = json_object_new_boolean(use_socket_transfer);
     json_object_object_add(request, "socket_transfer", socket_transfer_obj);
+
 
     // Send request
     if (send_json_request(ctx->socket_fd, request) < 0) {
-        fprintf(stderr, "Failed to send buffer test request\n");
+        fprintf(stderr, "ERROR: Failed to send buffer test request: %s\n", strerror(errno));
         json_object_put(request);
         return -1;
     }
     json_object_put(request);
 
-    // Send buffer data over socket if not using shared memory
-    if (!ctx->request_buffer && (operation == WINAPI_BUFFER_OP_WRITE || operation == WINAPI_BUFFER_OP_VERIFY)) {
+    // Send buffer data over socket if using socket transfer
+    if (use_socket_transfer && (operation == WINAPI_BUFFER_OP_WRITE || operation == WINAPI_BUFFER_OP_VERIFY)) {
         for (i = 0; i < buffer_count; i++) {
-            if (send(ctx->socket_fd, buffers[i].data, buffers[i].size, 0) != (ssize_t)buffers[i].size) {
-                fprintf(stderr, "Failed to send buffer data\n");
+            ssize_t sent = send(ctx->socket_fd, buffers[i].data, buffers[i].size, 0);
+            if (sent != (ssize_t)buffers[i].size) {
+                fprintf(stderr, "ERROR: Failed to send buffer data: sent %zd/%zu bytes, error: %s\n",
+                        sent, buffers[i].size, strerror(errno));
                 return -1;
             }
         }
-        printf("[INFO] Sent %lu bytes of buffer data over socket\n", total_size);
     }
 
     // Receive response
     response = receive_json_response(ctx->socket_fd);
     if (!response) {
-        fprintf(stderr, "Failed to receive buffer test response\n");
+        fprintf(stderr, "ERROR: Failed to receive buffer test response: %s\n", strerror(errno));
+        fprintf(stderr, "       This may indicate server crash or connection loss\n");
         return -1;
     }
 
@@ -543,7 +546,7 @@ int winapi_buffer_test(winapi_handle_t handle,
 
     // Handle buffer data reception
     if (operation == WINAPI_BUFFER_OP_READ && result->status == 0) {
-        if (ctx->response_buffer) {
+        if (!use_socket_transfer) {
             // Use shared memory (zero-copy)
             size_t offset = 0;
             for (i = 0; i < buffer_count; i++) {
@@ -551,8 +554,7 @@ int winapi_buffer_test(winapi_handle_t handle,
                 offset += buffers[i].size;
             }
         } else {
-            // Receive buffer data over socket for TCP connections
-            printf("[INFO] Receiving %lu bytes over socket (TCP mode)\n", total_size);
+            // Receive buffer data over socket
             for (i = 0; i < buffer_count; i++) {
                 if (recv(ctx->socket_fd, buffers[i].data, buffers[i].size, MSG_WAITALL) != (ssize_t)buffers[i].size) {
                     fprintf(stderr, "Failed to receive buffer data\n");
@@ -560,7 +562,6 @@ int winapi_buffer_test(winapi_handle_t handle,
                     return -1;
                 }
             }
-            printf("[INFO] Received %lu bytes of buffer data over socket\n", total_size);
         }
     }
 
