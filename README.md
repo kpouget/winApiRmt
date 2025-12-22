@@ -1,310 +1,102 @@
-# WinAPI Remoting for WSL2
+# Kevin Pouget's Development Environment
 
-High-performance Windows API remoting system for WSL2 using Hyper-V sockets and shared memory.
+Personal workspace containing various development projects, configurations, and tools.
 
-## Overview
+## 🛠️ Environment Setup
 
-This project enables Linux applications running in WSL2 to make high-performance API calls to Windows host services. It uses WSL2's officially supported communication mechanisms for optimal performance:
+- **OS**: Linux (Fedora 43) - `6.17.9-300.fc43.x86_64`
+- **Shell**: Bash with custom configuration
+- **Development Tools**: Git, Docker, Kubernetes, AI/ML tooling
 
-- **Hyper-V Sockets**: For control plane and metadata exchange
-- **Memory-Mapped Files**: For zero-copy bulk data transfer
+## 📂 Key Directories & Projects
 
-## Architecture
+### AI/ML & Language Models
+- **Claude Code**: `.claude/` - Claude Code CLI configuration and settings
+- **LLaMA**: `.llama/` - LLaMA model configurations and cache
+- **Ollama**: `.ollama/` - Local LLM management
+- **Models**: `models/` - Various AI model files
+- **Fine-tuning**: Various fine-tuning job configurations and logs
 
-```
-┌─────────────────┐    Hyper-V Socket     ┌─────────────────┐
-│   WSL2 Client   │◄──── (Metadata) ────►│ Windows Service │
-│                 │                       │                 │
-│   libwinapi.a   │    Memory-Mapped      │  WinAPIService  │
-│                 │◄──── (Bulk Data) ────►│                 │
-└─────────────────┘                       └─────────────────┘
-```
+### Kubernetes & OpenShift
+- **OpenShift**: `openshift/` - OpenShift project configurations
+- **Kube Config**: `.kube/` - Kubernetes cluster configurations
+- **KServe**: `kserve/` - Model serving configurations
+- **Ray**: Ray cluster and job YAML files for distributed computing
 
-### Key Benefits
+### Development Projects
+- **Pod Virtualization**: `pod-virt/` - Container virtualization work
+- **Duplicate Code Detection**: `duplicate-code-detection-tool/` - Code analysis tooling
+- **Data Science**: `ds/`, `diab/` - Data science and diabetes-related projects
+- **Remoting**: `remoting-linux/` - Remote access and control tools
+  - ⚠️ **VMBus approach**: Didn't work due to WSL limitations
+  - 🔍 **VSOCK/HYPERVSOCK**: Currently non-functional, still investigating
+  - 🔄 **TCP**: Using as temporary solution
 
-- ✅ **WSL2 Compatible**: Uses only officially supported WSL2 APIs
-- ✅ **High Performance**: Zero-copy transfers for bulk data via shared memory
-- ✅ **Simple Protocol**: JSON over Hyper-V sockets + binary shared memory
-- ✅ **No Drivers Required**: Pure userspace implementation
-- ✅ **Concurrent Operations**: Multiple outstanding requests supported
+### Configuration & Dotfiles
+- **RC Config**: `.config/rc_config/` - Shell and tool configurations
+- **Git**: `.gitconfig`, `.gitignore` - Git configuration
+- **SSH**: `.ssh/` - SSH keys and configuration
+- **AWS/Azure**: `.aws/`, `.azure/` - Cloud provider configurations
 
-## Requirements
+## 🚀 Notable Tools & Scripts
 
-### Windows Host
-- Windows 10/11 with WSL2 enabled
-- Visual Studio 2019+ or Build Tools for Visual Studio
-- Administrator privileges (for service installation)
+### AI & ML Utilities
+- `llama-stack-local-mcp.py` - Local LLaMA stack MCP integration
+- `mcp.py` - Model Control Protocol utilities
+- `favorite-color.py` - AI preference learning example
+- Various model fine-tuning and deployment scripts
 
-### WSL2 Guest
-- WSL2 distribution (Ubuntu, Debian, etc.)
-- GCC or Clang compiler
-- Make build system
+### System & Network Tools
+- `cleanup.py`, `cleanup.sh` - System cleanup utilities
+- `discover.py` - Network device discovery
+- `query_prometheus.py` - Prometheus monitoring queries
+- `gen_jwt.py` - JWT token generation
 
-## Quick Start
+### Kubernetes Utilities
+- Multiple YAML configurations for:
+  - Ray clusters and jobs
+  - PyTorch training jobs
+  - Data science pipelines
+  - Network attachment definitions
+  - Storage configurations
 
-### 1. Build
+## 📊 Current Projects
 
-Run the build script from the project root:
+### Active Development
+- **AI Model Fine-tuning**: Working with various language models
+- **Kubernetes Workloads**: Container orchestration and scaling
+- **Data Science Pipeline**: Analytics and visualization tools
+- **Remote Computing**: Distributed processing setups
 
-```bash
-./build.sh
-```
+### Research Areas
+- Model serving and optimization
+- Container security and isolation
+- Distributed AI training
+- Performance monitoring and metrics
 
-This builds:
-- WSL2 client library (`guest/client/libwinapi.a`)
-- Test client (`guest/client/test_client`)
-- Windows service (if Windows environment detected)
-
-### 2. Install Windows Service
-
-On Windows (as Administrator):
-
-```cmd
-cd host\service
-install.cmd
-```
-
-### 3. Test Communication
-
-In WSL2:
-
-```bash
-cd guest/client
-./test_client
-```
-
-## API Reference
-
-### Initialization
-
-```c
-#include "libwinapi.h"
-
-// Initialize the library
-winapi_handle_t handle = winapi_init();
-if (!handle) {
-    // Handle initialization error
-}
-
-// Clean up when done
-winapi_cleanup(handle);
-```
-
-### Echo API
-
-Simple request/response validation:
-
-```c
-char output[256];
-int result = winapi_echo(handle, "Hello Windows!", output, sizeof(output));
-if (result == 0) {
-    printf("Echo response: %s\n", output);
-}
-```
-
-### Buffer Testing
-
-Test large data transfers:
-
-```c
-// Allocate test buffer
-winapi_buffer_t buffer;
-winapi_alloc_buffer(&buffer, 1024 * 1024); // 1MB
-
-// Fill with test pattern
-memset(buffer.data, 0xAA, buffer.size);
-
-// Test buffer operations
-winapi_buffer_test_result_t result;
-int status = winapi_buffer_test(handle, &buffer, 1,
-                               WINAPI_BUFFER_OP_WRITE,
-                               0xAABBCCDD, &result);
-
-printf("Transferred: %lu bytes, Checksum: 0x%08X\n",
-       result.bytes_processed, result.checksum);
-
-winapi_free_buffer(&buffer);
-```
-
-### Performance Testing
-
-Measure latency and throughput:
-
-```c
-winapi_perf_test_params_t params = {
-    .test_type = WINAPI_PERF_THROUGHPUT,
-    .iterations = 1000,
-    .target_bytes = 1024 * 1024 * 10 // 10MB
-};
-
-winapi_buffer_t buffers[4];
-// Allocate and initialize buffers...
-
-winapi_perf_test_result_t result;
-int status = winapi_perf_test(handle, &params, buffers, 4, &result);
-
-printf("Throughput: %lu MB/s\n", result.throughput_mbps);
-printf("Avg Latency: %lu ns\n", result.avg_latency_ns);
-```
-
-## Communication Protocol
-
-### Hyper-V Socket Messages (JSON)
-
-```json
-{
-  "request_id": 12345,
-  "api": "echo|buffer_test|performance",
-  "payload_size": 1048576,
-  "payload_offset": 0,
-  "flags": ["zero_copy", "async"]
-}
-```
-
-### Shared Memory Layout
-
-```
-┌─────────────────┬──────────────────┬─────────────────┐
-│   Header (4KB)  │  Request (4MB)   │  Response (4MB) │
-├─────────────────┼──────────────────┼─────────────────┤
-│ - Magic: "WINA" │ - API payloads   │ - API results   │
-│ - Version       │ - Test buffers   │ - Response data │
-│ - Request count │ - Performance    │ - Error info    │
-│ - Sync flags    │   data           │ - Statistics    │
-└─────────────────┴──────────────────┴─────────────────┘
-```
-
-## Configuration
-
-### Default Settings
-
-- **Hyper-V Socket Port**: `0x1234`
-- **Shared Memory File**: `/mnt/c/temp/winapi_shared_memory`
-- **Memory Size**: 8MB (4KB header + 2×4MB buffers)
-- **Connection Timeout**: 30 seconds
-
-### Environment Variables
+## 🔧 Quick Start Commands
 
 ```bash
-export WINAPI_DEBUG=1              # Enable debug logging
-export WINAPI_SOCKET_PORT=0x5678   # Custom socket port
-export WINAPI_SHARED_MEM=/custom/path # Custom shared memory path
+# Check system status
+systemctl status
+
+# View running containers
+podman ps
+
+# Check Kubernetes clusters
+kubectl config get-contexts
+
+# Monitor system resources
+top -u $USER
 ```
 
-## Building from Source
+## 📝 Notes
 
-### WSL2 Client
+- Most configurations are symlinked to `.config/rc_config/` for centralized management
+- AI/ML models and cache files are substantial in size
+- Multiple cloud provider integrations configured
+- Extensive logging and monitoring setup
 
-```bash
-cd guest/client
-make clean
-make
+---
 
-# Static library: libwinapi.a
-# Test client: test_client
-```
-
-### Windows Service
-
-```cmd
-cd host\service
-build.cmd
-
-# Service executable: WinAPIService.exe
-# Installer script: install.cmd
-```
-
-### Manual Build (Advanced)
-
-```bash
-# WSL2 client with custom flags
-cd guest/client
-gcc -O3 -DDEBUG -o test_client test_client.c libwinapi.c -lpthread
-```
-
-## Testing
-
-### Unit Tests
-
-```bash
-cd guest/client
-./test_client --test echo
-./test_client --test buffer
-./test_client --test performance
-```
-
-### Integration Tests
-
-```bash
-# Full end-to-end test suite
-./test_client --integration
-
-# Stress testing
-./test_client --stress --iterations 10000
-```
-
-### Performance Benchmarks
-
-```bash
-# Latency benchmark
-./test_client --benchmark latency
-
-# Throughput benchmark
-./test_client --benchmark throughput --size 100MB
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**"Connection refused" error:**
-- Ensure Windows service is running: `sc query WinAPIService`
-- Check Windows Firewall settings
-- Verify Hyper-V socket support: `dmesg | grep hyperv`
-
-**"Shared memory access denied":**
-- Check file permissions on `/mnt/c/temp/winapi_shared_memory`
-- Ensure Windows service has write access to temp directory
-- Try running as administrator on Windows side
-
-**Poor performance:**
-- Verify shared memory is being used (check debug logs)
-- Monitor memory usage: `cat /proc/meminfo`
-- Check for memory fragmentation
-
-### Debug Logging
-
-Enable detailed logging:
-
-```bash
-export WINAPI_DEBUG=1
-export WINAPI_LOG_LEVEL=TRACE
-./test_client
-```
-
-### Service Status
-
-Check Windows service status:
-
-```cmd
-sc query WinAPIService
-Get-EventLog -LogName Application -Source "WinAPIService"
-```
-
-## Architecture Details
-
-For detailed technical documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## License
-
-This project is provided as-is for educational and testing purposes.
-
-## Contributing
-
-This is a proof-of-concept implementation. For production use, consider:
-
-- Adding authentication/authorization
-- Implementing rate limiting
-- Adding comprehensive error recovery
-- Security hardening for shared memory access
-- Performance optimizations for specific use cases
+*Last updated: $(date)*
