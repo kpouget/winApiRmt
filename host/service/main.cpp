@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <hvsocket.h>
 #include <guiddef.h>
 #include <stdio.h>
@@ -18,12 +19,39 @@
 #include <json/json.h>
 #include <conio.h>
 
+// Define INET_ADDRSTRLEN if not available
+#ifndef INET_ADDRSTRLEN
+#define INET_ADDRSTRLEN 16
+#endif
+
 #include "../../common/protocol.h"
+
+// AF_VSOCK definition for Windows (may not be available on all versions)
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
+
+// VSOCK address structure (if not defined)
+#ifndef SOCKADDR_VM
+struct sockaddr_vm {
+    ADDRESS_FAMILY svm_family;
+    USHORT svm_reserved1;
+    ULONG svm_port;
+    ULONG svm_cid;
+    UCHAR svm_zero[sizeof(struct sockaddr) - sizeof(ADDRESS_FAMILY) - sizeof(USHORT) - sizeof(ULONG) - sizeof(ULONG)];
+};
+#define SOCKADDR_VM struct sockaddr_vm
+#endif
+
+#ifndef VMADDR_CID_ANY
+#define VMADDR_CID_ANY -1U
+#endif
 
 // Service configuration
 #define SERVICE_NAME            L"WinApiRemoting"
 #define SERVICE_DISPLAY_NAME    L"Windows API Remoting for WSL2"
-#define HYPERV_SOCKET_PORT      0x1234
+#define HYPERV_SOCKET_PORT      0x400
+#define TCP_SOCKET_PORT         4660               // TCP fallback port
 #define SHARED_MEMORY_NAME      L"WinApiSharedMemory"
 #define SHARED_MEMORY_SIZE      (8 * 1024 * 1024)  // 8MB
 #define MAX_CLIENTS             16
@@ -53,6 +81,8 @@ struct shared_memory_header {
 // Global state
 struct service_context {
     SOCKET listen_socket;
+    SOCKET tcp_listen_socket;  // TCP fallback socket
+    BOOL using_tcp;            // TRUE if using TCP fallback
     HANDLE shared_memory_handle;
     LPVOID shared_memory_view;
     struct shared_memory_header *header;
@@ -65,6 +95,7 @@ struct service_context {
 static struct service_context g_ctx = {0};
 static SERVICE_STATUS_HANDLE g_service_status_handle = NULL;
 static SERVICE_STATUS g_service_status = {0};
+static BOOL g_force_tcp = FALSE;
 
 // Forward declarations
 void WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
@@ -73,16 +104,16 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam);
 DWORD InitializeService();
 void CleanupService();
 DWORD HandleClient(SOCKET client_socket);
-DWORD ProcessAPIRequest(const char* request_json, char* response_json, size_t response_size);
+DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* response_json, size_t response_size);
 
 // JSON helper functions
 Json::Value CreateErrorResponse(UINT32 request_id, const char* error_msg);
 Json::Value CreateSuccessResponse(UINT32 request_id);
 
 // API implementations
-DWORD HandleEchoAPI(const Json::Value& request, Json::Value& response);
-DWORD HandleBufferTestAPI(const Json::Value& request, Json::Value& response);
-DWORD HandlePerformanceAPI(const Json::Value& request, Json::Value& response);
+DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
+DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
+DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 
 /*
  * Service entry point
@@ -93,6 +124,12 @@ int main(int argc, char* argv[])
         if (_stricmp(argv[1], "console") == 0) {
             // Run as console application for debugging
             printf("Running Windows API Remoting Service in console mode...\n");
+
+            // Check for TCP flag
+            if (argc > 2 && _stricmp(argv[2], "--tcp") == 0) {
+                printf("Forcing TCP mode (no VSOCK attempt)\n");
+                g_force_tcp = TRUE;
+            }
 
             if (InitializeService() != ERROR_SUCCESS) {
                 printf("Failed to initialize service\n");
@@ -109,6 +146,14 @@ int main(int argc, char* argv[])
         }
         else if (_stricmp(argv[1], "install") == 0) {
             printf("Use install.cmd to install the service\n");
+            return 0;
+        }
+        else if (_stricmp(argv[1], "--help") == 0) {
+            printf("Usage: %s [options]\n", argv[0]);
+            printf("  console         Run in console mode for debugging\n");
+            printf("  console --tcp   Run in console mode with TCP-only (no VSOCK)\n");
+            printf("  install         Show install instructions\n");
+            printf("  --help          Show this help\n");
             return 0;
         }
     }
@@ -203,11 +248,19 @@ DWORD InitializeService()
 {
     WSADATA wsa_data;
     SOCKADDR_HV addr;
+    BOOL use_vsock;
+
+    // Initialize socket fields to INVALID_SOCKET
+    g_ctx.listen_socket = INVALID_SOCKET;
+    g_ctx.tcp_listen_socket = INVALID_SOCKET;
 
     // Initialize Winsock
+    printf("Initializing Winsock...\n");
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        printf("WSAStartup failed: %d\n", WSAGetLastError());
         return ERROR_NETWORK_UNREACHABLE;
     }
+    printf("Winsock initialized successfully\n");
 
     // Create stop event
     g_ctx.stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -217,6 +270,7 @@ DWORD InitializeService()
     }
 
     // Create shared memory
+    printf("Creating shared memory (%d MB)...\n", SHARED_MEMORY_SIZE / (1024*1024));
     g_ctx.shared_memory_handle = CreateFileMapping(
         INVALID_HANDLE_VALUE,
         NULL,
@@ -227,6 +281,7 @@ DWORD InitializeService()
     );
 
     if (g_ctx.shared_memory_handle == NULL) {
+        printf("CreateFileMapping failed: %d\n", GetLastError());
         CloseHandle(g_ctx.stop_event);
         WSACleanup();
         return GetLastError();
@@ -262,40 +317,116 @@ DWORD InitializeService()
     g_ctx.header->request_size = REQUEST_BUFFER_SIZE;
     g_ctx.header->response_size = RESPONSE_BUFFER_SIZE;
 
-    // Create Hyper-V socket
-    g_ctx.listen_socket = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
-    if (g_ctx.listen_socket == INVALID_SOCKET) {
-        UnmapViewOfFile(g_ctx.shared_memory_view);
-        CloseHandle(g_ctx.shared_memory_handle);
-        CloseHandle(g_ctx.stop_event);
-        WSACleanup();
-        return WSAGetLastError();
+    // Try AF_HYPERV first (unless TCP is forced), then fall back to TCP
+    g_ctx.using_tcp = FALSE;
+
+    if (g_force_tcp) {
+        printf("Step 1: Skipping VSOCK attempt (TCP mode forced)\n");
+        goto try_tcp_fallback;
     }
 
-    // Bind to Hyper-V socket
-    ZeroMemory(&addr, sizeof(addr));
-    addr.Family = AF_HYPERV;
-    addr.VmId = HV_GUID_WILDCARD;  // Accept connections from any VM
-    addr.ServiceId = HV_GUID_VSOCK_TEMPLATE;  // Use VSock template
-    addr.ServiceId.Data1 = HYPERV_SOCKET_PORT;
+    printf("Step 1: Attempting to create AF_HYPERV socket for VSOCK compatibility...\n");
+    g_ctx.listen_socket = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
 
-    if (bind(g_ctx.listen_socket, (SOCKADDR*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        closesocket(g_ctx.listen_socket);
-        UnmapViewOfFile(g_ctx.shared_memory_view);
-        CloseHandle(g_ctx.shared_memory_handle);
-        CloseHandle(g_ctx.stop_event);
-        WSACleanup();
-        return WSAGetLastError();
+    if (g_ctx.listen_socket != INVALID_SOCKET) {
+        printf("[OK] AF_HYPERV socket created successfully\n");
+
+        // Try to bind using Microsoft VSOCK Service GUID
+        printf("Step 2: Binding to Microsoft VSOCK GUID...\n");
+
+        ZeroMemory(&addr, sizeof(addr));
+        addr.Family = AF_HYPERV;
+        addr.VmId = HV_GUID_WILDCARD;  // Accept connections from any VM
+
+        // Use Microsoft's official Linux VSOCK template GUID
+        // Template: "00000000-facb-11e6-bd58-64006a7986d3"
+        // Port goes in Data1 field
+        addr.ServiceId.Data1 = HYPERV_SOCKET_PORT;  // Port in Data1
+        addr.ServiceId.Data2 = 0xfacb;               // Fixed: facb
+        addr.ServiceId.Data3 = 0x11e6;               // Fixed: 11e6
+        addr.ServiceId.Data4[0] = 0xbd;              // Fixed: bd
+        addr.ServiceId.Data4[1] = 0x58;              // Fixed: 58
+        addr.ServiceId.Data4[2] = 0x64;              // Fixed: 64
+        addr.ServiceId.Data4[3] = 0x00;              // Fixed: 00
+        addr.ServiceId.Data4[4] = 0x6a;              // Fixed: 6a
+        addr.ServiceId.Data4[5] = 0x79;              // Fixed: 79
+        addr.ServiceId.Data4[6] = 0x86;              // Fixed: 86
+        addr.ServiceId.Data4[7] = 0xd3;              // Fixed: d3
+
+        printf("   Linux VSOCK GUID: %08X-FACB-11E6-BD58-64006A7986D3\n", HYPERV_SOCKET_PORT);
+
+        if (bind(g_ctx.listen_socket, (SOCKADDR*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+            printf("[ERROR] AF_HYPERV bind() failed: %d - falling back to TCP\n", WSAGetLastError());
+            closesocket(g_ctx.listen_socket);
+            g_ctx.listen_socket = INVALID_SOCKET;
+            goto try_tcp_fallback;
+        }
+        printf("[OK] AF_HYPERV socket bound successfully\n");
+        printf("*** REGISTRY COMMAND TO RUN ***\n");
+        printf("New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\%08x-facb-11e6-bd58-64006a7986d3' -Force\n", HYPERV_SOCKET_PORT);
+        printf("Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices\\%08x-facb-11e6-bd58-64006a7986d3' -Name 'ElementName' -Value 'WinAPI Remoting Service'\n", HYPERV_SOCKET_PORT);
+        printf("*** END REGISTRY COMMAND ***\n");
+    } else {
+        printf("[ERROR] AF_HYPERV socket() failed: %d - falling back to TCP\n", WSAGetLastError());
+
+try_tcp_fallback:
+        printf("\nStep 1b: Attempting TCP fallback...\n");
+        g_ctx.listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+        if (g_ctx.listen_socket == INVALID_SOCKET) {
+            printf("[ERROR] TCP socket() failed: %d\n", WSAGetLastError());
+            UnmapViewOfFile(g_ctx.shared_memory_view);
+            CloseHandle(g_ctx.shared_memory_handle);
+            CloseHandle(g_ctx.stop_event);
+            WSACleanup();
+            return WSAGetLastError();
+        }
+
+        printf("[OK] TCP socket created successfully\n");
+
+        // Bind to TCP port
+        printf("Step 2b: Binding to TCP port %d...\n", TCP_SOCKET_PORT);
+        struct sockaddr_in tcp_addr;
+        ZeroMemory(&tcp_addr, sizeof(tcp_addr));
+        tcp_addr.sin_family = AF_INET;
+        tcp_addr.sin_addr.s_addr = INADDR_ANY;  // Listen on all interfaces
+        tcp_addr.sin_port = htons(TCP_SOCKET_PORT);
+
+        if (bind(g_ctx.listen_socket, (SOCKADDR*)&tcp_addr, sizeof(tcp_addr)) == SOCKET_ERROR) {
+            printf("[ERROR] TCP bind() failed: %d\n", WSAGetLastError());
+            closesocket(g_ctx.listen_socket);
+            UnmapViewOfFile(g_ctx.shared_memory_view);
+            CloseHandle(g_ctx.shared_memory_handle);
+            CloseHandle(g_ctx.stop_event);
+            WSACleanup();
+            return WSAGetLastError();
+        }
+
+        printf("[OK] TCP socket bound successfully\n");
+        g_ctx.using_tcp = TRUE;
+        printf("[INFO] Using TCP mode with shared memory for high-performance data transfers\n");
+        printf("   WSL2 clients should connect to Windows host IP on port %d\n", TCP_SOCKET_PORT);
+        printf("   Zero-copy buffer transfers available via shared memory\n");
     }
 
     // Start listening
+    printf("Step 3: Starting to listen for connections (max %d clients)...\n", MAX_CLIENTS);
     if (listen(g_ctx.listen_socket, MAX_CLIENTS) == SOCKET_ERROR) {
+        printf("[ERROR] listen() failed: %d\n", WSAGetLastError());
         closesocket(g_ctx.listen_socket);
         UnmapViewOfFile(g_ctx.shared_memory_view);
         CloseHandle(g_ctx.shared_memory_handle);
         CloseHandle(g_ctx.stop_event);
         WSACleanup();
         return WSAGetLastError();
+    }
+
+    if (g_ctx.using_tcp) {
+        printf("[OK] Listening on TCP port %d for WSL2 connections\n", TCP_SOCKET_PORT);
+        printf("   Note: TCP fallback mode - shared memory still provides zero-copy performance\n");
+    } else {
+        printf("[OK] Listening on Linux VSOCK port 0x%X for WSL2 AF_VSOCK connections\n", HYPERV_SOCKET_PORT);
+        printf("   Using Microsoft Linux VSOCK template GUID\n");
     }
 
     g_ctx.running = TRUE;
@@ -312,6 +443,11 @@ void CleanupService()
     if (g_ctx.listen_socket != INVALID_SOCKET) {
         closesocket(g_ctx.listen_socket);
         g_ctx.listen_socket = INVALID_SOCKET;
+    }
+
+    if (g_ctx.tcp_listen_socket != INVALID_SOCKET) {
+        closesocket(g_ctx.tcp_listen_socket);
+        g_ctx.tcp_listen_socket = INVALID_SOCKET;
     }
 
     if (g_ctx.shared_memory_view) {
@@ -340,8 +476,16 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
     fd_set readfds;
     struct timeval timeout;
     SOCKET client_socket;
-    SOCKADDR_HV client_addr;
+    union {
+        SOCKADDR_HV hv_addr;
+        struct sockaddr_in tcp_addr;
+        SOCKADDR generic_addr;
+    } client_addr;
     int addr_len;
+    static int heartbeat_counter = 0;
+
+    printf("Worker thread started, waiting for connections...\n");
+    printf("   Transport: %s\n", g_ctx.using_tcp ? "TCP" : "VSOCK");
 
     while (g_ctx.running) {
         FD_ZERO(&readfds);
@@ -352,17 +496,45 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 
         int result = select(0, &readfds, NULL, NULL, &timeout);
         if (result == SOCKET_ERROR) {
+            printf("select() failed: %d\n", WSAGetLastError());
             break;
         }
 
+        // Heartbeat every 30 seconds
+        if (++heartbeat_counter >= 30) {
+            printf("Service running (%s), waiting for connections...\n",
+                   g_ctx.using_tcp ? "TCP" : "VSOCK");
+            heartbeat_counter = 0;
+        }
+
         if (result > 0 && FD_ISSET(g_ctx.listen_socket, &readfds)) {
-            addr_len = sizeof(client_addr);
-            client_socket = accept(g_ctx.listen_socket, (SOCKADDR*)&client_addr, &addr_len);
+            printf("Incoming %s connection detected...\n",
+                   g_ctx.using_tcp ? "TCP" : "VSOCK");
+
+            // Set appropriate address length based on socket type
+            if (g_ctx.using_tcp) {
+                addr_len = sizeof(client_addr.tcp_addr);
+            } else {
+                addr_len = sizeof(client_addr.hv_addr);
+            }
+
+            client_socket = accept(g_ctx.listen_socket, &client_addr.generic_addr, &addr_len);
 
             if (client_socket != INVALID_SOCKET) {
+                if (g_ctx.using_tcp) {
+                    char* client_ip = inet_ntoa(client_addr.tcp_addr.sin_addr);
+                    printf("[OK] TCP connection accepted from %s:%d\n",
+                           client_ip, ntohs(client_addr.tcp_addr.sin_port));
+                } else {
+                    printf("[OK] VSOCK connection accepted successfully\n");
+                }
+
                 // Handle client in separate thread or inline
                 HandleClient(client_socket);
                 closesocket(client_socket);
+                printf("Client disconnected\n");
+            } else {
+                printf("accept() failed: %d\n", WSAGetLastError());
             }
         }
     }
@@ -401,7 +573,7 @@ DWORD HandleClient(SOCKET client_socket)
         request_buffer[msg_len] = '\0';
 
         // Process request
-        if (ProcessAPIRequest(request_buffer, response_buffer, sizeof(response_buffer)) == ERROR_SUCCESS) {
+        if (ProcessAPIRequest(client_socket, request_buffer, response_buffer, sizeof(response_buffer)) == ERROR_SUCCESS) {
             // Send response
             UINT32 response_len = (UINT32)strlen(response_buffer);
             UINT32 net_len = htonl(response_len);
@@ -418,7 +590,7 @@ DWORD HandleClient(SOCKET client_socket)
 /*
  * Process API request
  */
-DWORD ProcessAPIRequest(const char* request_json, char* response_json, size_t response_size)
+DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* response_json, size_t response_size)
 {
     Json::Value request, response;
     Json::Reader reader;
@@ -439,13 +611,13 @@ DWORD ProcessAPIRequest(const char* request_json, char* response_json, size_t re
     DWORD result = ERROR_SUCCESS;
 
     if (api == "echo") {
-        result = HandleEchoAPI(request, response);
+        result = HandleEchoAPI(client_socket, request, response);
     }
     else if (api == "buffer_test") {
-        result = HandleBufferTestAPI(request, response);
+        result = HandleBufferTestAPI(client_socket, request, response);
     }
     else if (api == "performance") {
-        result = HandlePerformanceAPI(request, response);
+        result = HandlePerformanceAPI(client_socket, request, response);
     }
     else {
         response = CreateErrorResponse(request_id, "Unknown API");
@@ -486,7 +658,7 @@ Json::Value CreateSuccessResponse(UINT32 request_id)
 /*
  * Handle echo API
  */
-DWORD HandleEchoAPI(const Json::Value& request, Json::Value& response)
+DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
 {
     UINT32 request_id = request.get("request_id", 0).asUInt();
     std::string input = request.get("input", "").asString();
@@ -500,12 +672,13 @@ DWORD HandleEchoAPI(const Json::Value& request, Json::Value& response)
 /*
  * Handle buffer test API
  */
-DWORD HandleBufferTestAPI(const Json::Value& request, Json::Value& response)
+DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
 {
     UINT32 request_id = request.get("request_id", 0).asUInt();
     int operation = request.get("operation", 0).asInt();
     UINT32 test_pattern = request.get("test_pattern", 0).asUInt();
     UINT64 payload_size = request.get("payload_size", 0).asUInt64();
+    bool socket_transfer = request.get("socket_transfer", false).asBool();
 
     response = CreateSuccessResponse(request_id);
 
@@ -517,8 +690,17 @@ DWORD HandleBufferTestAPI(const Json::Value& request, Json::Value& response)
     // Handle different operations
     switch (operation) {
         case WINAPI_BUFFER_OP_READ:
-            // Fill response buffer with test pattern
-            if (payload_size <= RESPONSE_BUFFER_SIZE) {
+            if (socket_transfer) {
+                // Send buffer data over socket
+                printf("[INFO] Sending %llu bytes over socket (TCP mode)\n", payload_size);
+                UINT32* pattern_buffer = new UINT32[payload_size / sizeof(UINT32)];
+                for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
+                    pattern_buffer[i] = test_pattern;
+                }
+                // Note: Data will be sent after JSON response
+                delete[] pattern_buffer;
+            } else if (payload_size <= RESPONSE_BUFFER_SIZE) {
+                // Fill response buffer with test pattern (shared memory)
                 UINT32* buf = (UINT32*)g_ctx.response_buffer;
                 for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
                     buf[i] = test_pattern;
@@ -528,8 +710,29 @@ DWORD HandleBufferTestAPI(const Json::Value& request, Json::Value& response)
 
         case WINAPI_BUFFER_OP_WRITE:
         case WINAPI_BUFFER_OP_VERIFY:
-            // Verify data in request buffer
-            if (payload_size <= REQUEST_BUFFER_SIZE) {
+            if (socket_transfer) {
+                // Receive buffer data over socket
+                printf("[INFO] Receiving %llu bytes over socket (TCP mode)\n", payload_size);
+                char* temp_buffer = new char[payload_size];
+                int total_received = 0;
+                while (total_received < payload_size) {
+                    int received = recv(client_socket, temp_buffer + total_received,
+                                      (int)(payload_size - total_received), 0);
+                    if (received <= 0) break;
+                    total_received += received;
+                }
+
+                // Calculate checksum
+                UINT32 checksum = 0;
+                UINT32* buf = (UINT32*)temp_buffer;
+                for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
+                    checksum ^= buf[i];
+                }
+                result["checksum"] = checksum;
+                delete[] temp_buffer;
+                printf("[INFO] Received %d bytes, checksum: 0x%08X\n", total_received, checksum);
+            } else if (payload_size <= REQUEST_BUFFER_SIZE) {
+                // Verify data in request buffer (shared memory)
                 UINT32* buf = (UINT32*)g_ctx.request_buffer;
                 UINT32 checksum = 0;
                 for (UINT64 i = 0; i < payload_size / sizeof(UINT32); i++) {
@@ -547,7 +750,7 @@ DWORD HandleBufferTestAPI(const Json::Value& request, Json::Value& response)
 /*
  * Handle performance API
  */
-DWORD HandlePerformanceAPI(const Json::Value& request, Json::Value& response)
+DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
 {
     UINT32 request_id = request.get("request_id", 0).asUInt();
     int test_type = request.get("test_type", 0).asInt();

@@ -10,17 +10,55 @@ net session >nul 2>&1
 if errorlevel 1 (
     echo ERROR: This script must be run as Administrator
     echo Right-click and select "Run as administrator"
-    pause
     exit /b 1
 )
 
-REM Check if service binary exists
-if not exist "WinApiRemotingService.exe" (
-    echo ERROR: Service binary not found
-    echo Please run build.cmd first to compile the service
-    pause
-    exit /b 1
+REM Debug: Show current directory and contents
+echo Current directory: %CD%
+echo Checking for service binary...
+
+REM Check if service binary exists (CMake build location first)
+set "SERVICE_BINARY="
+
+if exist "build\Release\WinApiRemotingService.exe" (
+    echo [FOUND] CMake build: build\Release\WinApiRemotingService.exe
+    set "SERVICE_BINARY=build\Release\WinApiRemotingService.exe"
+    goto :binary_found
 )
+
+if exist "WinApiRemotingService.exe" (
+    echo [FOUND] Direct build: WinApiRemotingService.exe
+    set "SERVICE_BINARY=WinApiRemotingService.exe"
+    goto :binary_found
+)
+
+REM If we get here, no binary was found
+echo [NOT FOUND] Service binary not found
+echo.
+echo Current directory contents:
+dir
+echo.
+echo Checking build directory:
+if exist "build" (
+    echo build directory exists
+    dir build
+    if exist "build\Release" (
+        echo build\Release directory exists
+        dir build\Release
+    ) else (
+        echo build\Release directory does not exist
+    )
+) else (
+    echo build directory does not exist
+)
+echo.
+echo Expected locations:
+echo   build\Release\WinApiRemotingService.exe (CMake build)
+echo   WinApiRemotingService.exe (direct build)
+echo Please run build.cmd first to compile the service
+exit /b 1
+
+:binary_found
 
 REM Stop service if already running
 echo Stopping existing service...
@@ -42,8 +80,8 @@ if errorlevel 1 (
     timeout /t 2 /nobreak >nul
 )
 
-REM Get current directory for service path
-set "SERVICE_PATH=%CD%\WinApiRemotingService.exe"
+REM Get full path for service binary
+set "SERVICE_PATH=%CD%\%SERVICE_BINARY%"
 
 echo Service path: %SERVICE_PATH%
 
@@ -57,7 +95,6 @@ sc create WinApiRemoting ^
 
 if errorlevel 1 (
     echo ERROR: Failed to create service
-    pause
     exit /b 1
 )
 
@@ -119,6 +156,3 @@ echo Start service:    net start WinApiRemoting
 echo Stop service:     net stop WinApiRemoting
 echo Restart service:  net stop WinApiRemoting ^&^& net start WinApiRemoting
 echo Uninstall:        uninstall.cmd
-
-echo.
-pause

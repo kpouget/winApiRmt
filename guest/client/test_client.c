@@ -317,7 +317,7 @@ int main(int argc, char *argv[])
     handle = winapi_init();
     if (!handle) {
         printf("ERROR: Failed to initialize API remoting library\n");
-        printf("Make sure the winapi_client driver is loaded and /dev/winapi exists\n");
+        printf("Make sure Windows service is running and network connectivity is available\n");
         return 1;
     }
 

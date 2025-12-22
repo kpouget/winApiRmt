@@ -10,7 +10,6 @@ net session >nul 2>&1
 if errorlevel 1 (
     echo ERROR: This script must be run as Administrator
     echo Right-click and select "Run as administrator"
-    pause
     exit /b 1
 )
 
@@ -32,7 +31,6 @@ sc delete WinApiRemoting
 if errorlevel 1 (
     echo ERROR: Failed to remove service
     echo The service may not be installed or may still be running
-    pause
     exit /b 1
 ) else (
     echo Service removed successfully
@@ -50,4 +48,3 @@ echo 3. Check Event Log for any remaining entries
 
 echo.
 echo The service has been completely removed from the system.
-pause

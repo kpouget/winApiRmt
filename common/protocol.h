@@ -12,7 +12,7 @@
 #define WINAPI_PROTOCOL_VERSION 1
 
 /* VMBus channel GUID for our service */
-#define WINAPI_VMBUS_GUID "6ac83d8f-6e16-4e5c-ab3d-fd8c5a4b7e21"
+#define WINAPI_VMBUS_GUID "77b4bcb3-3fc8-4f74-9c93-0b1887b19e19"
 
 /* Message types */
 typedef enum {
@@ -152,4 +152,3 @@ typedef winapi_perf_test_response_t WINAPI_PERF_TEST_RESPONSE_T, *PWINAPI_PERF_T
 #endif
 
 #endif /* WINAPI_REMOTING_PROTOCOL_H */
-
