@@ -15,14 +15,16 @@
 #include "libwinapi.h"
 
 /* Test configuration */
-#define TEST_BUFFER_SIZES_COUNT 6
+#define TEST_BUFFER_SIZES_COUNT 8
 static const size_t test_buffer_sizes[] = {
-    4096,           /* 4KB */
-    64 * 1024,      /* 64KB */
-    256 * 1024,     /* 256KB */
-    1024 * 1024,    /* 1MB */
+    4096,            /* 4KB */
+    64 * 1024,       /* 64KB */
+    256 * 1024,      /* 256KB */
+    1024 * 1024,     /* 1MB */
     4 * 1024 * 1024, /* 4MB */
-    16 * 1024 * 1024 /* 16MB */
+    8 * 1024 * 1024, /* 8MB */
+    12 * 1024 * 1024, /* 12MB */
+    15 * 1024 * 1024 /* 15MB - Max shared memory buffer */
 };
 
 /* Helper function to format bytes */

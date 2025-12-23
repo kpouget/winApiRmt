@@ -55,13 +55,17 @@ struct sockaddr_vm {
 #define HYPERV_SOCKET_PORT      0x400
 #define TCP_SOCKET_PORT         4660               // TCP fallback port
 #define SHARED_MEMORY_NAME      L"WinApiSharedMemory"
-#define SHARED_MEMORY_SIZE      (8 * 1024 * 1024)  // 8MB
+#define SHARED_MEMORY_SIZE      (32 * 1024 * 1024) // 32MB
 #define MAX_CLIENTS             16
 
 // Shared Memory Layout
 #define HEADER_SIZE             4096
-#define REQUEST_BUFFER_SIZE     (4 * 1024 * 1024)  // 4MB
-#define RESPONSE_BUFFER_SIZE    (4 * 1024 * 1024)  // 4MB
+#define REQUEST_BUFFER_SIZE     (15 * 1024 * 1024) // 15MB
+#define RESPONSE_BUFFER_SIZE    (15 * 1024 * 1024) // 15MB
+
+// SafeMemoryWrite boundary - switch to safe writes this far from buffer end
+#define SAFE_WRITE_BOUNDARY     (32 * 1024)  // 32KB before buffer end
+#define SAFE_WRITE_OFFSET       (RESPONSE_BUFFER_SIZE - SAFE_WRITE_BOUNDARY)
 
 // Magic values
 #define WINAPI_MAGIC            0x57494E41  // "WINA"
@@ -1047,7 +1051,7 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
                         break; // Stop before exceeding buffer
                     }
 
-                    if (byte_offset > 4180000) {  // Use safe write near boundary
+                    if (byte_offset > SAFE_WRITE_OFFSET) {  // Use safe write near boundary
                         if (!SafeMemoryWrite(&buf[i], test_pattern, byte_offset)) {
                             break;
                         }

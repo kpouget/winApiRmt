@@ -30,13 +30,17 @@
 #define TCP_FALLBACK_PORT         4660               // TCP fallback port
 #define VMADDR_CID_PARENT         0x2     // Connect to parent (Windows host)
 #define SHARED_MEMORY_PATH        "/mnt/c/temp/winapi_shared_memory"
-#define SHARED_MEMORY_SIZE        (8 * 1024 * 1024)  // 8MB
+#define SHARED_MEMORY_SIZE        (32 * 1024 * 1024) // 32MB
 #define REQUEST_TIMEOUT_MS        5000
 
 /* Shared Memory Layout */
 #define HEADER_SIZE               4096
-#define REQUEST_BUFFER_SIZE       (4 * 1024 * 1024)  // 4MB
-#define RESPONSE_BUFFER_SIZE      (4 * 1024 * 1024)  // 4MB
+#define REQUEST_BUFFER_SIZE       (15 * 1024 * 1024) // 15MB
+#define RESPONSE_BUFFER_SIZE      (15 * 1024 * 1024) // 15MB
+
+/* SafeMemoryWrite boundary constants */
+#define SAFE_WRITE_BOUNDARY       (32 * 1024)  // 32KB before buffer end
+#define SAFE_WRITE_OFFSET         (RESPONSE_BUFFER_SIZE - SAFE_WRITE_BOUNDARY)
 
 /* Magic values */
 #define WINAPI_MAGIC              0x57494E41  // "WINA"
