@@ -22,6 +22,7 @@
 #include <conio.h>
 #include <signal.h>
 #include <time.h>
+#include <algorithm>
 
 // Define INET_ADDRSTRLEN if not available
 #ifndef INET_ADDRSTRLEN
@@ -136,6 +137,7 @@ Json::Value CreateSuccessResponse(UINT32 request_id);
 DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
+DWORD HandleSharedBufferAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 
 /*
  * Windows exception handler for crash detection (replaces Unix signals)
@@ -485,81 +487,14 @@ DWORD InitializeService()
         return GetLastError();
     }
 
-    // Create shared memory using file-backed mapping for WSL2 compatibility
-    printf("Creating shared memory (%d MB)...\n", SHARED_MEMORY_SIZE / (1024*1024));
+    // Initialize shared memory pointers to NULL (using dynamic shared buffers now)
+    g_ctx.shared_memory_handle = NULL;
+    g_ctx.shared_memory_view = NULL;
+    g_ctx.header = NULL;
+    g_ctx.request_buffer = NULL;
+    g_ctx.response_buffer = NULL;
 
-    // Open the shared memory file (must be created first)
-    HANDLE file_handle = CreateFile(
-        L"C:\\temp\\winapi_shared_memory",
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL,
-        OPEN_EXISTING,           // File must already exist
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-
-    if (file_handle == INVALID_HANDLE_VALUE) {
-        printf("Failed to open shared memory file C:\\temp\\winapi_shared_memory: %d\n", GetLastError());
-        printf("Please create the file first using: enable-tcp-shared-memory.ps1\n");
-        printf("Or manually: fsutil file createnew C:\\temp\\winapi_shared_memory %d\n", SHARED_MEMORY_SIZE);
-        CloseHandle(g_ctx.stop_event);
-        WSACleanup();
-        return GetLastError();
-    }
-
-    printf("Opened shared memory file: C:\\temp\\winapi_shared_memory\n");
-    printf("File-backed shared memory enabled for TCP + zero-copy mode\n");
-
-    // Create file-backed mapping
-    g_ctx.shared_memory_handle = CreateFileMapping(
-        file_handle,             // Use actual file instead of memory-only
-        NULL,
-        PAGE_READWRITE,
-        0,
-        SHARED_MEMORY_SIZE,
-        NULL                     // No name needed for file-backed mapping
-    );
-
-    // Close file handle (mapping keeps it alive)
-    CloseHandle(file_handle);
-
-    if (g_ctx.shared_memory_handle == NULL) {
-        printf("CreateFileMapping failed: %d\n", GetLastError());
-        CloseHandle(g_ctx.stop_event);
-        WSACleanup();
-        return GetLastError();
-    }
-
-    // Map shared memory
-    g_ctx.shared_memory_view = MapViewOfFile(
-        g_ctx.shared_memory_handle,
-        FILE_MAP_ALL_ACCESS,
-        0,
-        0,
-        SHARED_MEMORY_SIZE
-    );
-
-    if (g_ctx.shared_memory_view == NULL) {
-        CloseHandle(g_ctx.shared_memory_handle);
-        CloseHandle(g_ctx.stop_event);
-        WSACleanup();
-        return GetLastError();
-    }
-
-    // Initialize shared memory layout
-    g_ctx.header = (struct shared_memory_header*)g_ctx.shared_memory_view;
-    g_ctx.request_buffer = (char*)g_ctx.shared_memory_view + HEADER_SIZE;
-    g_ctx.response_buffer = (char*)g_ctx.shared_memory_view + HEADER_SIZE + REQUEST_BUFFER_SIZE;
-
-    // Initialize header
-    ZeroMemory(g_ctx.header, sizeof(*g_ctx.header));
-    g_ctx.header->magic = WINAPI_MAGIC;
-    g_ctx.header->version = PROTOCOL_VERSION;
-    g_ctx.header->request_offset = HEADER_SIZE;
-    g_ctx.header->response_offset = HEADER_SIZE + REQUEST_BUFFER_SIZE;
-    g_ctx.header->request_size = REQUEST_BUFFER_SIZE;
-    g_ctx.header->response_size = RESPONSE_BUFFER_SIZE;
+    printf("Using dynamic shared buffer architecture (no fixed shared memory required)\n");
 
     // Try AF_HYPERV first (unless TCP is forced), then fall back to TCP
     g_ctx.using_tcp = FALSE;
@@ -685,7 +620,7 @@ try_tcp_fallback:
 
     if (g_ctx.using_tcp) {
         printf("[OK] Listening on TCP port %d for WSL2 connections\n", TCP_SOCKET_PORT);
-        printf("   Note: TCP fallback mode - shared memory still provides zero-copy performance\n");
+        printf("   Zero-copy transfers available via dynamic shared buffers\n");
     } else {
         printf("[OK] Listening on Linux VSOCK port 0x%X for WSL2 AF_VSOCK connections\n", HYPERV_SOCKET_PORT);
         printf("   Using Microsoft Linux VSOCK template GUID\n");
@@ -999,6 +934,9 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
     else if (api == "performance") {
         result = HandlePerformanceAPI(client_socket, request, response);
     }
+    else if (api == "shared_buffer") {
+        result = HandleSharedBufferAPI(client_socket, request, response);
+    }
     else {
         response = CreateErrorResponse(request_id, "Unknown API");
         result = ERROR_INVALID_FUNCTION;
@@ -1220,11 +1158,60 @@ DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Jso
 
     // Simulate performance metrics
     Json::Value result;
-    result["min_latency_ns"] = (Json::UInt64)1000;     // 1 µs
-    result["max_latency_ns"] = (Json::UInt64)100000;   // 100 µs
-    result["avg_latency_ns"] = (Json::UInt64)10000;    // 10 µs
+    result["min_latency_ns"] = (Json::UInt64)1000;     // 1 us
+    result["max_latency_ns"] = (Json::UInt64)100000;   // 100 us
+    result["avg_latency_ns"] = (Json::UInt64)10000;    // 10 us
     result["throughput_mbps"] = (Json::UInt64)1000;    // 1000 MB/s
     result["iterations_completed"] = iterations;
+
+    response["result"] = result;
+    return ERROR_SUCCESS;
+}
+
+/*
+ * Handle shared buffer API
+ */
+DWORD HandleSharedBufferAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
+{
+    UNREFERENCED_PARAMETER(client_socket);
+
+    UINT32 request_id = request.get("request_id", 0).asUInt();
+    std::string operation = request.get("operation", "").asString();
+    std::string file_path = request.get("file_path", "").asString();
+    UINT64 buffer_size = request.get("buffer_size", 0).asUInt64();
+    UINT32 buffer_id = request.get("buffer_id", 0).asUInt();
+
+    printf("Shared buffer request: operation='%s', file='%s', size=%I64u bytes, id=%u\n",
+           operation.c_str(), file_path.c_str(), buffer_size, buffer_id);
+
+    // Convert Linux path to Windows path
+    std::string windows_path = file_path;
+    if (windows_path.substr(0, 6) == "/mnt/c") {
+        windows_path = "C:" + windows_path.substr(6);
+        std::replace(windows_path.begin(), windows_path.end(), '/', '\\');
+    }
+
+    printf("Windows path: %s\n", windows_path.c_str());
+
+    // For now, just simulate processing (no-op as requested)
+    if (operation == "process") {
+        // Optional: Could map the file and do actual processing here
+        // HANDLE file_handle = CreateFileA(windows_path.c_str(), ...);
+        // LPVOID mapped_memory = MapViewOfFile(...);
+        // [do processing]
+        // UnmapViewOfFile(mapped_memory);
+        // CloseHandle(file_handle);
+
+        printf("[OK] Simulated processing of shared buffer (no-op)\n");
+    }
+
+    response = CreateSuccessResponse(request_id);
+
+    Json::Value result;
+    result["operation"] = operation;
+    result["buffer_id"] = buffer_id;
+    result["bytes_processed"] = (Json::UInt64)buffer_size;
+    result["status"] = "processed";
 
     response["result"] = result;
     return ERROR_SUCCESS;

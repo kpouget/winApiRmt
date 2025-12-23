@@ -84,6 +84,24 @@ int winapi_perf_test(winapi_handle_t handle,
 int winapi_alloc_buffer(winapi_buffer_t *buffer, size_t size);
 void winapi_free_buffer(winapi_buffer_t *buffer);
 
+/* Dynamic shared memory buffer management */
+typedef struct {
+    void *data;              // Mapped memory pointer
+    size_t size;             // Buffer size in bytes
+    char file_path[256];     // Path to backing file
+    int fd;                  // File descriptor
+    uint32_t buffer_id;      // Unique buffer identifier
+} winapi_shared_buffer_t;
+
+/* Allocate a new shared memory buffer */
+int winapi_alloc_shared_buffer(winapi_handle_t handle, size_t size, winapi_shared_buffer_t *buffer);
+
+/* Send shared buffer to host for processing */
+int winapi_process_shared_buffer(winapi_handle_t handle, winapi_shared_buffer_t *buffer, const char *operation);
+
+/* Free a shared memory buffer */
+void winapi_free_shared_buffer(winapi_shared_buffer_t *buffer);
+
 #ifdef __cplusplus
 }
 #endif

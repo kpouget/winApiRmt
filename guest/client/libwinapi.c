@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <linux/vm_sockets.h>  // For Hyper-V socket support
 #include <arpa/inet.h>         // For htonl/ntohl network byte order
 #include <netinet/in.h>        // For TCP socket support
@@ -29,7 +30,7 @@
 #define HYPERV_SOCKET_PORT        0x400
 #define TCP_FALLBACK_PORT         4660               // TCP fallback port
 #define VMADDR_CID_PARENT         0x2     // Connect to parent (Windows host)
-#define SHARED_MEMORY_PATH        "/mnt/c/temp/winapi_shared_memory"
+#define TEMP_DIR_PATH             "/mnt/c/temp"
 #define SHARED_MEMORY_SIZE        (32 * 1024 * 1024) // 32MB
 #define REQUEST_TIMEOUT_MS        5000
 
@@ -190,10 +191,10 @@ winapi_handle_t winapi_init(void)
     printf("Attempting VSOCK connection to Windows host...\n");
     fd = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (fd < 0) {
-        printf("❌ VSOCK socket creation failed: %s\n", strerror(errno));
+        printf("[ERROR] VSOCK socket creation failed: %s\n", strerror(errno));
         vsock_failed = 1;
     } else {
-        printf("✅ VSOCK socket created\n");
+        printf("[OK] VSOCK socket created\n");
 
         // Connect to Windows host via VSOCK
         memset(&vsock_addr, 0, sizeof(vsock_addr));
@@ -202,11 +203,11 @@ winapi_handle_t winapi_init(void)
         vsock_addr.svm_port = HYPERV_SOCKET_PORT;
 
         if (connect(fd, (struct sockaddr*)&vsock_addr, sizeof(vsock_addr)) < 0) {
-            printf("❌ VSOCK connection failed: %s\n", strerror(errno));
+            printf("[ERROR] VSOCK connection failed: %s\n", strerror(errno));
             close(fd);
             vsock_failed = 1;
         } else {
-            printf("✅ VSOCK connection successful\n");
+            printf("[OK] VSOCK connection successful\n");
             ctx->socket_fd = fd;
             ctx->is_connected = 1;
         }
@@ -219,7 +220,7 @@ winapi_handle_t winapi_init(void)
 
         // Get Windows host IP
         if (get_windows_host_ip(host_ip, sizeof(host_ip)) < 0) {
-            printf("❌ Failed to determine Windows host IP address\n");
+            printf("[ERROR] Failed to determine Windows host IP address\n");
             free(ctx);
             return NULL;
         }
@@ -228,18 +229,18 @@ winapi_handle_t winapi_init(void)
         // Create TCP socket
         fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
-            printf("❌ TCP socket creation failed: %s\n", strerror(errno));
+            printf("[ERROR] TCP socket creation failed: %s\n", strerror(errno));
             free(ctx);
             return NULL;
         }
-        printf("✅ TCP socket created\n");
+        printf("[OK] TCP socket created\n");
 
         // Setup address
         memset(&tcp_addr, 0, sizeof(tcp_addr));
         tcp_addr.sin_family = AF_INET;
         tcp_addr.sin_port = htons(TCP_FALLBACK_PORT);
         if (inet_pton(AF_INET, host_ip, &tcp_addr.sin_addr) <= 0) {
-            printf("❌ Invalid host IP address: %s\n", host_ip);
+            printf("[ERROR] Invalid host IP address: %s\n", host_ip);
             close(fd);
             free(ctx);
             return NULL;
@@ -248,7 +249,7 @@ winapi_handle_t winapi_init(void)
         // Set socket to non-blocking for connection timeout
         int flags = fcntl(fd, F_GETFL, 0);
         if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-            printf("⚠️  Warning: Could not set non-blocking mode\n");
+            printf("[WARN] Could not set non-blocking mode\n");
         }
 
         // Connect to Windows host via TCP (with timeout)
@@ -272,26 +273,26 @@ winapi_handle_t winapi_init(void)
                     int socket_error;
                     socklen_t len = sizeof(socket_error);
                     if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &len) < 0 || socket_error != 0) {
-                        printf("❌ TCP connection failed: %s\n", strerror(socket_error ? socket_error : errno));
+                        printf("[ERROR] TCP connection failed: %s\n", strerror(socket_error ? socket_error : errno));
                         printf("   Make sure Windows service is running and listening on port %d\n", TCP_FALLBACK_PORT);
                         close(fd);
                         free(ctx);
                         return NULL;
                     }
                 } else if (select_result == 0) {
-                    printf("❌ TCP connection failed: Connection timeout\n");
+                    printf("[ERROR] TCP connection failed: Connection timeout\n");
                     printf("   Make sure Windows service is running and listening on port %d\n", TCP_FALLBACK_PORT);
                     close(fd);
                     free(ctx);
                     return NULL;
                 } else {
-                    printf("❌ TCP connection failed: %s\n", strerror(errno));
+                    printf("[ERROR] TCP connection failed: %s\n", strerror(errno));
                     close(fd);
                     free(ctx);
                     return NULL;
                 }
             } else {
-                printf("❌ TCP connection failed: %s\n", strerror(errno));
+                printf("[ERROR] TCP connection failed: %s\n", strerror(errno));
                 printf("   Make sure Windows service is running and listening on port %d\n", TCP_FALLBACK_PORT);
                 close(fd);
                 free(ctx);
@@ -301,57 +302,20 @@ winapi_handle_t winapi_init(void)
 
         // Restore blocking mode
         if (fcntl(fd, F_SETFL, flags) < 0) {
-            printf("⚠️  Warning: Could not restore blocking mode\n");
+            printf("[WARN] Could not restore blocking mode\n");
         }
 
-        printf("✅ TCP connection successful\n");
-        printf("ℹ️  Using TCP mode - checking for shared memory...\n");
+        printf("[OK] TCP connection successful\n");
+        printf("[INFO] Using TCP mode with dynamic shared buffers\n");
         ctx->socket_fd = fd;
         ctx->is_connected = 1;
     }
 
-    // Try to map shared memory (works for both VSOCK and TCP on same machine)
-    int shm_fd = open(SHARED_MEMORY_PATH, O_RDWR);
-    if (shm_fd < 0) {
-        printf("❌ Shared memory not available - using TCP-only mode\n");
-        printf("   File not found: %s\n", SHARED_MEMORY_PATH);
-        printf("   Error: %s\n", strerror(errno));
-        printf("   Note: For zero-copy performance, ensure shared memory file exists\n");
-        ctx->shared_memory = NULL;
-        ctx->header = NULL;
-        ctx->request_buffer = NULL;
-        ctx->response_buffer = NULL;
-    } else {
-        ctx->shared_memory = mmap(NULL, SHARED_MEMORY_SIZE, PROT_READ | PROT_WRITE,
-                                  MAP_SHARED, shm_fd, 0);
-        close(shm_fd);
-
-        if (ctx->shared_memory == MAP_FAILED) {
-            printf("❌ Shared memory mapping failed - using TCP-only mode\n");
-            printf("   Error: %s\n", strerror(errno));
-            ctx->shared_memory = NULL;
-            ctx->header = NULL;
-            ctx->request_buffer = NULL;
-            ctx->response_buffer = NULL;
-        } else {
-            // Set up memory layout
-            ctx->header = (struct shared_memory_header*)ctx->shared_memory;
-            ctx->request_buffer = (char*)ctx->shared_memory + HEADER_SIZE;
-            ctx->response_buffer = (char*)ctx->shared_memory + HEADER_SIZE + REQUEST_BUFFER_SIZE;
-
-            // Verify magic
-            if (ctx->header->magic != WINAPI_MAGIC) {
-                printf("Invalid shared memory magic: 0x%x (expected 0x%x)\n",
-                       ctx->header->magic, WINAPI_MAGIC);
-                munmap(ctx->shared_memory, SHARED_MEMORY_SIZE);
-                close(fd);
-                free(ctx);
-                return NULL;
-            }
-            printf("✅ Shared memory connected for zero-copy transfers (TCP + shared memory hybrid)\n");
-            printf("   Magic verified: 0x%X\n", ctx->header->magic);
-        }
-    }
+    // Initialize shared memory pointers to NULL (using dynamic shared buffers now)
+    ctx->shared_memory = NULL;
+    ctx->header = NULL;
+    ctx->request_buffer = NULL;
+    ctx->response_buffer = NULL;
 
     printf("Connected to Windows API remoting service\n");
     return ctx;
@@ -674,4 +638,159 @@ void winapi_free_buffer(winapi_buffer_t *buffer)
         buffer->data = NULL;
         buffer->size = 0;
     }
+}
+
+/*
+ * Dynamic Shared Memory Buffer Management
+ */
+
+/* Global counter for unique buffer IDs */
+static uint32_t g_next_buffer_id = 1;
+
+/* Allocate a new shared memory buffer */
+int winapi_alloc_shared_buffer(winapi_handle_t handle, size_t size, winapi_shared_buffer_t *buffer)
+{
+    struct winapi_context *ctx = (struct winapi_context *)handle;
+
+    if (!ctx || !buffer || size == 0) {
+        return -1;
+    }
+
+    // Initialize buffer structure
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->size = size;
+    buffer->buffer_id = g_next_buffer_id++;
+
+    // Create unique temporary file name
+    snprintf(buffer->file_path, sizeof(buffer->file_path),
+             "%s/winapi_shared_buffer_%u_%d",
+             TEMP_DIR_PATH, buffer->buffer_id, getpid());
+
+    // Ensure temp directory exists
+    if (mkdir(TEMP_DIR_PATH, 0755) < 0 && errno != EEXIST) {
+        printf("Failed to create temp directory %s: %s\n", TEMP_DIR_PATH, strerror(errno));
+        printf("Make sure /mnt/c is mounted and writable\n");
+        return -1;
+    }
+
+    // Create the file
+    buffer->fd = open(buffer->file_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (buffer->fd < 0) {
+        printf("Failed to create shared buffer file: %s (%s)\n",
+               buffer->file_path, strerror(errno));
+        printf("Make sure the temp directory %s exists and is writable\n", TEMP_DIR_PATH);
+        return -1;
+    }
+
+    // Set file size
+    if (ftruncate(buffer->fd, size) < 0) {
+        printf("Failed to set buffer file size: %s\n", strerror(errno));
+        close(buffer->fd);
+        unlink(buffer->file_path);
+        return -1;
+    }
+
+    // Map file into memory
+    buffer->data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer->fd, 0);
+    if (buffer->data == MAP_FAILED) {
+        printf("Failed to map shared buffer: %s\n", strerror(errno));
+        close(buffer->fd);
+        unlink(buffer->file_path);
+        return -1;
+    }
+
+    printf("[OK] Allocated shared buffer: %s (%zu bytes)\n", buffer->file_path, size);
+    return 0;
+}
+
+/* Send shared buffer to host for processing */
+int winapi_process_shared_buffer(winapi_handle_t handle, winapi_shared_buffer_t *buffer, const char *operation)
+{
+    struct winapi_context *ctx = (struct winapi_context *)handle;
+    json_object *request, *response;
+    json_object *op_obj, *path_obj, *size_obj, *id_obj;
+    uint32_t request_id;
+
+    if (!ctx || !ctx->is_connected || !buffer || !operation) {
+        return -1;
+    }
+
+    // Create JSON request
+    request_id = ctx->next_request_id++;
+    request = create_request("shared_buffer", request_id);
+
+    op_obj = json_object_new_string(operation);
+    path_obj = json_object_new_string(buffer->file_path);
+    size_obj = json_object_new_int64(buffer->size);
+    id_obj = json_object_new_int(buffer->buffer_id);
+
+    json_object_object_add(request, "operation", op_obj);
+    json_object_object_add(request, "file_path", path_obj);
+    json_object_object_add(request, "buffer_size", size_obj);
+    json_object_object_add(request, "buffer_id", id_obj);
+
+    // Send request
+    if (send_json_request(ctx->socket_fd, request) < 0) {
+        fprintf(stderr, "Failed to send shared buffer request\n");
+        json_object_put(request);
+        return -1;
+    }
+    json_object_put(request);
+
+    // Receive response
+    response = receive_json_response(ctx->socket_fd);
+    if (!response) {
+        fprintf(stderr, "Failed to receive shared buffer response\n");
+        return -1;
+    }
+
+    // Check response status
+    json_object *status_obj;
+    if (json_object_object_get_ex(response, "status", &status_obj)) {
+        const char *status = json_object_get_string(status_obj);
+        if (strcmp(status, "success") != 0) {
+            fprintf(stderr, "Shared buffer processing failed\n");
+            json_object_put(response);
+            return -1;
+        }
+    }
+
+    json_object_put(response);
+    printf("[OK] Host processed shared buffer: %s\n", buffer->file_path);
+    return 0;
+}
+
+/* Free a shared memory buffer */
+void winapi_free_shared_buffer(winapi_shared_buffer_t *buffer)
+{
+    if (!buffer) {
+        return;
+    }
+
+    // Unmap memory
+    if (buffer->data && buffer->data != MAP_FAILED) {
+        munmap(buffer->data, buffer->size);
+        buffer->data = NULL;
+    }
+
+    // Close file descriptor
+    if (buffer->fd >= 0) {
+        close(buffer->fd);
+        buffer->fd = -1;
+    }
+
+    // Remove the backing file
+    if (buffer->file_path[0] != '\0') {
+        if (unlink(buffer->file_path) < 0) {
+            printf("Warning: Failed to remove shared buffer file: %s (%s)\n",
+                   buffer->file_path, strerror(errno));
+        } else {
+            printf("[OK] Cleaned up shared buffer: %s\n", buffer->file_path);
+        }
+        buffer->file_path[0] = '\0';
+    }
+
+    // Reset structure
+    buffer->size = 0;
+    buffer->buffer_id = 0;
 }

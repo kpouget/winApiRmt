@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
+#include <stdbool.h>
 
 #include "libwinapi.h"
 
@@ -286,6 +287,82 @@ static int test_throughput_performance(winapi_handle_t handle)
     return 0;
 }
 
+/* Test dynamic shared memory buffers */
+static int test_dynamic_shared_buffers(winapi_handle_t handle)
+{
+    winapi_shared_buffer_t buffers[3];
+    size_t buffer_sizes[] = {
+        1024 * 1024,     /* 1MB */
+        8 * 1024 * 1024, /* 8MB */
+        32 * 1024 * 1024 /* 32MB */
+    };
+    int i, ret = 0;
+
+    printf("\n=== Dynamic Shared Buffer Test ===\n");
+
+    for (i = 0; i < 3; i++) {
+        char size_str[32];
+        format_bytes(buffer_sizes[i], size_str, sizeof(size_str));
+
+        printf("Testing %s dynamic buffer...\n", size_str);
+
+        // Allocate dynamic shared buffer
+        if (winapi_alloc_shared_buffer(handle, buffer_sizes[i], &buffers[i]) < 0) {
+            printf("ERROR: Failed to allocate %s shared buffer\n", size_str);
+            ret = -1;
+            continue;
+        }
+
+        // Fill buffer with test pattern
+        printf("  Filling buffer with test pattern...\n");
+        uint32_t *data = (uint32_t *)buffers[i].data;
+        uint32_t pattern = 0xABCDEF00 + i;
+        size_t uint32_count = buffer_sizes[i] / sizeof(uint32_t);
+
+        for (size_t j = 0; j < uint32_count; j++) {
+            data[j] = pattern;
+        }
+
+        // Send to host for processing
+        printf("  Sending to host for processing...\n");
+        if (winapi_process_shared_buffer(handle, &buffers[i], "process") < 0) {
+            printf("ERROR: Failed to process shared buffer\n");
+            winapi_free_shared_buffer(&buffers[i]);
+            ret = -1;
+            continue;
+        }
+
+        // Verify buffer content is still intact
+        printf("  Verifying buffer integrity...\n");
+        bool integrity_ok = true;
+        for (size_t j = 0; j < uint32_count && j < 1000; j++) { // Check first 1000 elements
+            if (data[j] != pattern) {
+                integrity_ok = false;
+                break;
+            }
+        }
+
+        if (integrity_ok) {
+            printf("  ✅ Buffer integrity verified\n");
+        } else {
+            printf("  ❌ Buffer integrity check failed\n");
+            ret = -1;
+        }
+
+        // Clean up
+        winapi_free_shared_buffer(&buffers[i]);
+        printf("  ✅ Buffer cleaned up\n\n");
+    }
+
+    if (ret == 0) {
+        printf("Dynamic shared buffer tests completed successfully!\n");
+    } else {
+        printf("Some dynamic shared buffer tests failed.\n");
+    }
+
+    return ret;
+}
+
 /* Main test function */
 int main(int argc, char *argv[])
 {
@@ -304,12 +381,15 @@ int main(int argc, char *argv[])
             test_mask = 0x02;
         } else if (strcmp(argv[i], "--perf-only") == 0) {
             test_mask = 0x04;
+        } else if (strcmp(argv[i], "--shared-only") == 0) {
+            test_mask = 0x08;
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("Options:\n");
             printf("  --echo-only    Run only echo tests\n");
             printf("  --buffer-only  Run only buffer tests\n");
             printf("  --perf-only    Run only performance tests\n");
+            printf("  --shared-only  Run only dynamic shared buffer tests\n");
             printf("  --help         Show this help\n");
             return 0;
         }
@@ -348,6 +428,12 @@ int main(int argc, char *argv[])
             overall_result = 1;
         }
         if (test_throughput_performance(handle) < 0) {
+            overall_result = 1;
+        }
+    }
+
+    if (test_mask & 0x08) {
+        if (test_dynamic_shared_buffers(handle) < 0) {
             overall_result = 1;
         }
     }
