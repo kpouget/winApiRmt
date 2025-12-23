@@ -18,6 +18,8 @@
 #include <string.h>
 #include <json/json.h>
 #include <conio.h>
+#include <signal.h>
+#include <time.h>
 
 // Define INET_ADDRSTRLEN if not available
 #ifndef INET_ADDRSTRLEN
@@ -95,7 +97,7 @@ struct service_context {
 static struct service_context g_ctx = {0};
 static SERVICE_STATUS_HANDLE g_service_status_handle = NULL;
 static SERVICE_STATUS g_service_status = {0};
-static BOOL g_force_tcp = FALSE;
+static BOOL g_force_tcp = TRUE;  // Default to TCP mode
 
 // Forward declarations
 void WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
@@ -105,6 +107,10 @@ DWORD InitializeService();
 void CleanupService();
 DWORD HandleClient(SOCKET client_socket);
 DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* response_json, size_t response_size);
+
+// Windows exception handler for crash detection
+LONG WINAPI WindowsExceptionHandler(EXCEPTION_POINTERS* ExceptionInfo);
+void SignalHandler(int signal_num);
 
 // Safe memory write with SEH
 BOOL SafeMemoryWrite(UINT32* ptr, UINT32 value, UINT64 offset);
@@ -124,6 +130,127 @@ Json::Value CreateSuccessResponse(UINT32 request_id);
 DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
 DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response);
+
+/*
+ * Windows exception handler for crash detection (replaces Unix signals)
+ */
+LONG WINAPI WindowsExceptionHandler(EXCEPTION_POINTERS* ExceptionInfo)
+{
+    const char* exception_name;
+    DWORD exception_code = ExceptionInfo->ExceptionRecord->ExceptionCode;
+
+    switch (exception_code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+            exception_name = "EXCEPTION_ACCESS_VIOLATION (Segmentation fault equivalent)";
+            break;
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+            exception_name = "EXCEPTION_ARRAY_BOUNDS_EXCEEDED";
+            break;
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+            exception_name = "EXCEPTION_DATATYPE_MISALIGNMENT";
+            break;
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+            exception_name = "EXCEPTION_FLT_DIVIDE_BY_ZERO";
+            break;
+        case EXCEPTION_FLT_OVERFLOW:
+            exception_name = "EXCEPTION_FLT_OVERFLOW";
+            break;
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+            exception_name = "EXCEPTION_ILLEGAL_INSTRUCTION";
+            break;
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+            exception_name = "EXCEPTION_INT_DIVIDE_BY_ZERO";
+            break;
+        case EXCEPTION_INT_OVERFLOW:
+            exception_name = "EXCEPTION_INT_OVERFLOW";
+            break;
+        case EXCEPTION_INVALID_DISPOSITION:
+            exception_name = "EXCEPTION_INVALID_DISPOSITION";
+            break;
+        case EXCEPTION_STACK_OVERFLOW:
+            exception_name = "EXCEPTION_STACK_OVERFLOW";
+            break;
+        default:
+            exception_name = "Unknown Windows exception";
+            break;
+    }
+
+    printf("\n\n*** WINDOWS CRASH DETECTED ***\n");
+    printf("Exception Code: 0x%08X (%s)\n", exception_code, exception_name);
+
+    time_t current_time = time(NULL);
+    printf("Time: %s", ctime(&current_time));
+
+    printf("Exception Address: %p\n", ExceptionInfo->ExceptionRecord->ExceptionAddress);
+
+    if (exception_code == EXCEPTION_ACCESS_VIOLATION && ExceptionInfo->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR access_type = ExceptionInfo->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR address = ExceptionInfo->ExceptionRecord->ExceptionInformation[1];
+        printf("Access Violation: %s at address %p\n",
+               access_type == 0 ? "Read" : (access_type == 1 ? "Write" : "Execute"),
+               (void*)address);
+    }
+
+    printf("Server is terminating due to exception...\n");
+    fflush(stdout);
+
+    // Clean up if possible
+    if (g_ctx.running) {
+        printf("Attempting cleanup...\n");
+        fflush(stdout);
+        CleanupService();
+    }
+
+    // Return EXCEPTION_EXECUTE_HANDLER to terminate the process
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+/*
+ * Signal handler for crash detection (for compatibility signals)
+ */
+void SignalHandler(int signal_num)
+{
+    const char* signal_name;
+    switch (signal_num) {
+        case SIGABRT:
+            signal_name = "SIGABRT (Abort signal)";
+            break;
+        case SIGILL:
+            signal_name = "SIGILL (Illegal instruction)";
+            break;
+        case SIGFPE:
+            signal_name = "SIGFPE (Floating point exception)";
+            break;
+        case SIGTERM:
+            signal_name = "SIGTERM (Termination request)";
+            break;
+        case SIGINT:
+            signal_name = "SIGINT (Interrupt)";
+            break;
+        default:
+            signal_name = "Unknown signal";
+            break;
+    }
+
+    printf("\n\n*** CRASH DETECTED ***\n");
+    printf("Signal: %d (%s)\n", signal_num, signal_name);
+
+    time_t current_time = time(NULL);
+    printf("Time: %s", ctime(&current_time));
+    printf("Server is terminating due to signal...\n");
+    fflush(stdout);
+
+    // Clean up if possible
+    if (g_ctx.running) {
+        printf("Attempting cleanup...\n");
+        fflush(stdout);
+        CleanupService();
+    }
+
+    // Re-raise the signal with default handler to generate crash dump if available
+    signal(signal_num, SIG_DFL);
+    raise(signal_num);
+}
 
 /*
  * Safe memory write with SEH
@@ -146,15 +273,30 @@ BOOL SafeMemoryWrite(UINT32* ptr, UINT32 value, UINT64 offset)
  */
 int main(int argc, char* argv[])
 {
+    // Install Windows exception handler for crashes (access violations, etc.)
+    SetUnhandledExceptionFilter(WindowsExceptionHandler);
+    printf("[INFO] Windows exception handler installed for crash detection\n");
+
+    // Install signal handlers for compatibility signals that work on Windows
+    signal(SIGABRT, SignalHandler);  // Abort signal
+    signal(SIGFPE, SignalHandler);   // Floating point exception
+    signal(SIGILL, SignalHandler);   // Illegal instruction
+    signal(SIGINT, SignalHandler);   // Interrupt (Ctrl+C)
+    signal(SIGTERM, SignalHandler);  // Termination request
+    // Note: SIGSEGV doesn't work reliably on Windows - using SEH instead
+
+    printf("[INFO] Signal handlers installed for termination signals\n");
+    fflush(stdout);
+
     if (argc > 1) {
         if (_stricmp(argv[1], "console") == 0) {
             // Run as console application for debugging
             printf("Running Windows API Remoting Service in console mode...\n");
 
-            // Check for TCP flag
-            if (argc > 2 && _stricmp(argv[2], "--tcp") == 0) {
-                printf("Forcing TCP mode (no VSOCK attempt)\n");
-                g_force_tcp = TRUE;
+            // Check for VSOCK flag (TCP is now default)
+            if (argc > 2 && _stricmp(argv[2], "--vsock") == 0) {
+                printf("Enabling VSOCK mode (will attempt VSOCK first)\n");
+                g_force_tcp = FALSE;
             }
 
             if (InitializeService() != ERROR_SUCCESS) {
@@ -176,8 +318,8 @@ int main(int argc, char* argv[])
         }
         else if (_stricmp(argv[1], "--help") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
-            printf("  console         Run in console mode for debugging\n");
-            printf("  console --tcp   Run in console mode with TCP-only (no VSOCK)\n");
+            printf("  console         Run in console mode (TCP default)\n");
+            printf("  console --vsock Run in console mode with VSOCK preferred\n");
             printf("  install         Show install instructions\n");
             printf("  --help          Show this help\n");
             return 0;
@@ -375,7 +517,7 @@ DWORD InitializeService()
     g_ctx.using_tcp = FALSE;
 
     if (g_force_tcp) {
-        printf("Step 1: Skipping VSOCK attempt (TCP mode forced)\n");
+        printf("Step 1: Using TCP mode (default)\n");
         goto try_tcp_fallback;
     }
 
@@ -466,13 +608,31 @@ try_tcp_fallback:
     // Start listening
     printf("Step 3: Starting to listen for connections (max %d clients)...\n", MAX_CLIENTS);
     if (listen(g_ctx.listen_socket, MAX_CLIENTS) == SOCKET_ERROR) {
-        printf("[ERROR] listen() failed: %d\n", WSAGetLastError());
+        DWORD error_code = WSAGetLastError();
+        printf("[FATAL ERROR] Failed to start listening on socket: %d\n", error_code);
+        printf("              Cannot accept client connections - service terminating\n");
+
+        // Clean up all resources before exiting
+        printf("              Cleaning up resources...\n");
         closesocket(g_ctx.listen_socket);
-        UnmapViewOfFile(g_ctx.shared_memory_view);
-        CloseHandle(g_ctx.shared_memory_handle);
-        CloseHandle(g_ctx.stop_event);
+        g_ctx.listen_socket = INVALID_SOCKET;
+
+        if (g_ctx.shared_memory_view) {
+            UnmapViewOfFile(g_ctx.shared_memory_view);
+            g_ctx.shared_memory_view = NULL;
+        }
+        if (g_ctx.shared_memory_handle) {
+            CloseHandle(g_ctx.shared_memory_handle);
+            g_ctx.shared_memory_handle = NULL;
+        }
+        if (g_ctx.stop_event) {
+            CloseHandle(g_ctx.stop_event);
+            g_ctx.stop_event = NULL;
+        }
+
         WSACleanup();
-        return WSAGetLastError();
+        printf("              Resource cleanup completed - exiting\n");
+        return error_code;
     }
 
     if (g_ctx.using_tcp) {
@@ -611,6 +771,11 @@ DWORD HandleClient(SOCKET client_socket)
         // Receive message length
         bytes_received = recv(client_socket, (char*)&msg_len, sizeof(msg_len), MSG_WAITALL);
         if (bytes_received != sizeof(msg_len)) {
+            if (bytes_received == 0) {
+                printf("[INFO] Client disconnected gracefully\n");
+            } else {
+                printf("[ERROR] Failed to receive message length: %d\n", WSAGetLastError());
+            }
             break;
         }
 
@@ -629,7 +794,13 @@ DWORD HandleClient(SOCKET client_socket)
         request_count++;
 
         // Process request
-        DWORD result = ProcessAPIRequest(client_socket, request_buffer, response_buffer, sizeof(response_buffer));
+        DWORD result;
+        try {
+            result = ProcessAPIRequest(client_socket, request_buffer, response_buffer, sizeof(response_buffer));
+        } catch (...) {
+            printf("[ERROR] Exception during request processing\n");
+            break;
+        }
 
         if (result == ERROR_SUCCESS) {
             // Send response
@@ -649,9 +820,15 @@ DWORD HandleClient(SOCKET client_socket)
             // Check if we need to send buffer data for READ operations
             Json::Value parsed_response;
             Json::Reader response_reader;
-            if (response_reader.parse(response_buffer, parsed_response)) {
-                Json::Value result_section = parsed_response.get("result", Json::Value());
-                if (!result_section.isNull() && result_section.isMember("needs_buffer_send") && result_section.get("needs_buffer_send", false).asBool()) {
+
+            try {
+                if (response_reader.parse(response_buffer, parsed_response)) {
+                    Json::Value result_section = parsed_response.get("result", Json::Value());
+
+                    // Only check for buffer data if result is an object (buffer test responses)
+                    // Echo responses have result as a string, so skip buffer check
+                    if (!result_section.isNull() && result_section.isObject() &&
+                        result_section.isMember("needs_buffer_send") && result_section.get("needs_buffer_send", false).asBool()) {
                     uint64_t buffer_size = result_section.get("buffer_size", 0).asUInt64();
                     uint32_t test_pattern = result_section.get("test_pattern", 0).asUInt();
 
@@ -675,8 +852,13 @@ DWORD HandleClient(SOCKET client_socket)
                         }
                         total_sent += chunk_sent;
                     }
-                    delete[] pattern_buffer;
+                        delete[] pattern_buffer;
+                    }
                 }
+            } catch (const std::exception& e) {
+                // Ignore JSON parsing exceptions for buffer data check
+            } catch (...) {
+                // Ignore unknown exceptions for buffer data check
             }
         } else {
             // Send error response
@@ -699,8 +881,6 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
     Json::Reader reader;
     Json::StreamWriterBuilder builder;
 
-    printf("[DEBUG] Parsing JSON request...\n");
-
     // Parse request
     if (!reader.parse(request_json, request)) {
         printf("[ERROR] JSON parsing failed: %s\n", reader.getFormattedErrorMessages().c_str());
@@ -712,8 +892,6 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
     // Get API name and request ID
     std::string api = request.get("api", "").asString();
     UINT32 request_id = request.get("request_id", 0).asUInt();
-
-    printf("[DEBUG] Processing API: '%s', request_id: %u\n", api.c_str(), request_id);
 
     if (api.empty()) {
         printf("[ERROR] Missing API name in request\n");
@@ -731,11 +909,8 @@ DWORD ProcessAPIRequest(SOCKET client_socket, const char* request_json, char* re
         result = HandleEchoAPI(client_socket, request, response);
     }
     else if (api == "buffer_test") {
-        printf("[DEBUG] About to call HandleBufferTestAPI\n");
-        fflush(stdout);
         try {
             result = HandleBufferTestAPI(client_socket, request, response);
-            printf("[DEBUG] HandleBufferTestAPI completed successfully\n");
         } catch (const std::exception& e) {
             printf("[ERROR] Exception in HandleBufferTestAPI: %s\n", e.what());
             response = CreateErrorResponse(request_id, "Server exception occurred");
