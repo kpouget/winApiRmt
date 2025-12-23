@@ -720,9 +720,10 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 
         // Heartbeat every 30 seconds
         if (++heartbeat_counter >= 30) {
-            printf("Service running (%s), waiting for connections...\n",
-                   g_ctx.using_tcp ? "TCP" : "VSOCK");
-            heartbeat_counter = 0;
+	  //printf("Service running (%s), waiting for connections...\n",
+	  //g_ctx.using_tcp ? "TCP" : "VSOCK");
+
+	  heartbeat_counter = 0;
         }
 
         if (result > 0 && FD_ISSET(g_ctx.listen_socket, &readfds)) {
