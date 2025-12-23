@@ -6,7 +6,9 @@
  */
 
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 
 #include <windows.h>
 #include <winsock2.h>
@@ -349,6 +351,9 @@ int main(int argc, char* argv[])
  */
 void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 {
+    UNREFERENCED_PARAMETER(argc);
+    UNREFERENCED_PARAMETER(argv);
+
     // Register service control handler
     g_service_status_handle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
     if (g_service_status_handle == NULL) {
@@ -420,7 +425,6 @@ DWORD InitializeService()
 {
     WSADATA wsa_data;
     SOCKADDR_HV addr;
-    BOOL use_vsock;
 
     // Initialize socket fields to INVALID_SOCKET
     g_ctx.listen_socket = INVALID_SOCKET;
@@ -691,6 +695,8 @@ void CleanupService()
  */
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 {
+    UNREFERENCED_PARAMETER(lpParam);
+
     fd_set readfds;
     struct timeval timeout;
     SOCKET client_socket;
@@ -861,6 +867,7 @@ DWORD HandleClient(SOCKET client_socket)
                     }
                 }
             } catch (const std::exception& e) {
+                UNREFERENCED_PARAMETER(e);
                 // Ignore JSON parsing exceptions for buffer data check
             } catch (...) {
                 // Ignore unknown exceptions for buffer data check
@@ -970,6 +977,8 @@ Json::Value CreateSuccessResponse(UINT32 request_id)
  */
 DWORD HandleEchoAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
 {
+    UNREFERENCED_PARAMETER(client_socket);
+
     UINT32 request_id = request.get("request_id", 0).asUInt();
     std::string input = request.get("input", "").asString();
 
@@ -1134,10 +1143,15 @@ DWORD HandleBufferTestAPI(SOCKET client_socket, const Json::Value& request, Json
  */
 DWORD HandlePerformanceAPI(SOCKET client_socket, const Json::Value& request, Json::Value& response)
 {
+    UNREFERENCED_PARAMETER(client_socket);
+
     UINT32 request_id = request.get("request_id", 0).asUInt();
     int test_type = request.get("test_type", 0).asInt();
     int iterations = request.get("iterations", 1000).asInt();
     UINT64 target_bytes = request.get("target_bytes", 1024).asUInt64();
+
+    UNREFERENCED_PARAMETER(test_type);
+    UNREFERENCED_PARAMETER(target_bytes);
 
     response = CreateSuccessResponse(request_id);
 
