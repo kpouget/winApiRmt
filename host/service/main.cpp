@@ -217,7 +217,17 @@ LONG WINAPI WindowsExceptionHandler(EXCEPTION_POINTERS* ExceptionInfo)
 void SignalHandler(int signal_num)
 {
     const char* signal_name;
+    bool is_graceful_termination = false;
+
     switch (signal_num) {
+        case SIGINT:
+            signal_name = "SIGINT (Ctrl+C Interrupt)";
+            is_graceful_termination = true;
+            break;
+        case SIGTERM:
+            signal_name = "SIGTERM (Termination request)";
+            is_graceful_termination = true;
+            break;
         case SIGABRT:
             signal_name = "SIGABRT (Abort signal)";
             break;
@@ -227,35 +237,60 @@ void SignalHandler(int signal_num)
         case SIGFPE:
             signal_name = "SIGFPE (Floating point exception)";
             break;
-        case SIGTERM:
-            signal_name = "SIGTERM (Termination request)";
-            break;
-        case SIGINT:
-            signal_name = "SIGINT (Interrupt)";
-            break;
         default:
             signal_name = "Unknown signal";
             break;
     }
 
-    printf("\n\n*** CRASH DETECTED ***\n");
-    printf("Signal: %d (%s)\n", signal_num, signal_name);
-
-    time_t current_time = time(NULL);
-    printf("Time: %s", ctime(&current_time));
-    printf("Server is terminating due to signal...\n");
-    fflush(stdout);
-
-    // Clean up if possible
-    if (g_ctx.running) {
-        printf("Attempting cleanup...\n");
+    if (is_graceful_termination) {
+        printf("\n\n*** GRACEFUL SHUTDOWN REQUESTED ***\n");
+        printf("Signal: %d (%s)\n", signal_num, signal_name);
+        printf("Shutting down server gracefully...\n");
         fflush(stdout);
-        CleanupService();
-    }
 
-    // Re-raise the signal with default handler to generate crash dump if available
-    signal(signal_num, SIG_DFL);
-    raise(signal_num);
+        // Signal worker thread to stop gracefully
+        if (g_ctx.running) {
+            printf("Stopping worker thread...\n");
+            fflush(stdout);
+            g_ctx.running = FALSE;
+
+            // Set stop event to wake up any waiting operations
+            if (g_ctx.stop_event) {
+                SetEvent(g_ctx.stop_event);
+            }
+
+            // Give worker thread a moment to finish current operations
+            Sleep(100);
+
+            printf("Cleaning up resources...\n");
+            fflush(stdout);
+            CleanupService();
+            printf("Shutdown complete.\n");
+            fflush(stdout);
+        }
+
+        // Exit cleanly without re-raising signal
+        exit(0);
+    } else {
+        printf("\n\n*** CRASH DETECTED ***\n");
+        printf("Signal: %d (%s)\n", signal_num, signal_name);
+
+        time_t current_time = time(NULL);
+        printf("Time: %s", ctime(&current_time));
+        printf("Server is terminating due to signal...\n");
+        fflush(stdout);
+
+        // Clean up if possible for crash scenarios
+        if (g_ctx.running) {
+            printf("Attempting emergency cleanup...\n");
+            fflush(stdout);
+            CleanupService();
+        }
+
+        // Re-raise the signal with default handler for crash dump
+        signal(signal_num, SIG_DFL);
+        raise(signal_num);
+    }
 }
 
 /*
@@ -310,12 +345,17 @@ int main(int argc, char* argv[])
                 return 1;
             }
 
-            printf("Service initialized. Press any key to stop...\n");
+            printf("Service initialized. Press Ctrl+C to stop gracefully...\n");
             ServiceWorkerThread(NULL);
 
-            printf("Press any key to exit...\n");
-            _getch();
-            CleanupService();
+            // If we reach here, the worker thread has exited
+            if (g_ctx.running) {
+                // Worker thread exited unexpectedly, cleanup
+                printf("Worker thread exited unexpectedly. Cleaning up...\n");
+                CleanupService();
+            }
+            // else: Signal handler already did cleanup
+
             return 0;
         }
         else if (_stricmp(argv[1], "install") == 0) {
@@ -720,7 +760,15 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
 
         int result = select(0, &readfds, NULL, NULL, &timeout);
         if (result == SOCKET_ERROR) {
-            printf("select() failed: %d\n", WSAGetLastError());
+            DWORD error = WSAGetLastError();
+            if (g_ctx.running) {
+                printf("select() failed: %d\n", error);
+            }
+            break;
+        }
+
+        // Check if we should stop (graceful shutdown)
+        if (!g_ctx.running) {
             break;
         }
 
@@ -743,6 +791,11 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
                 addr_len = sizeof(client_addr.hv_addr);
             }
 
+            // Check if service is still running before accepting
+            if (!g_ctx.running) {
+                break;
+            }
+
             client_socket = accept(g_ctx.listen_socket, &client_addr.generic_addr, &addr_len);
 
             if (client_socket != INVALID_SOCKET) {
@@ -759,11 +812,21 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam)
                 closesocket(client_socket);
                 printf("Client disconnected\n");
             } else {
-                printf("accept() failed: %d\n", WSAGetLastError());
+                DWORD error = WSAGetLastError();
+                // Only report error if service is still running (avoid noise during shutdown)
+                if (g_ctx.running) {
+                    if (error == WSAENOTSOCK || error == WSAEINVAL) {
+                        printf("Socket closed during shutdown\n");
+                    } else {
+                        printf("accept() failed: %d\n", error);
+                    }
+                }
+                break;
             }
         }
     }
 
+    printf("Worker thread exiting cleanly\n");
     return 0;
 }
 
