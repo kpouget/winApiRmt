@@ -52,7 +52,7 @@ static int test_echo(winapi_handle_t handle)
         "This is a longer message to test buffer handling capabilities"
     };
     char response[1024];
-    int i;
+    size_t i;
 
     printf("\n=== Echo API Test ===\n");
 
@@ -60,7 +60,7 @@ static int test_echo(winapi_handle_t handle)
         printf("Sending: \"%s\"\n", test_messages[i]);
 
         if (winapi_echo(handle, test_messages[i], response, sizeof(response)) < 0) {
-            printf("ERROR: Echo failed for message %d\n", i);
+            printf("ERROR: Echo failed for message %ld\n", i);
             return -1;
         }
 
